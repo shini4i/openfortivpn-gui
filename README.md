@@ -1,5 +1,7 @@
 # openfortivpn-gui
 
+[![codecov](https://codecov.io/gh/shini4i/openfortivpn-gui/graph/badge.svg?token=PSGP25XQ4K)](https://codecov.io/gh/shini4i/openfortivpn-gui)
+
 A modern GTK4/libadwaita GUI client for Fortinet SSL VPN on Linux, wrapping the [openfortivpn](https://github.com/adrienverge/openfortivpn) CLI tool.
 
 ## Features
