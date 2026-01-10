@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=OpenFortiVPN GUI
+Comment=GTK4 GUI client for Fortinet SSL VPN
+Exec=openfortivpn-gui
+Icon=network-vpn
+Terminal=false
+Type=Application
+Categories=Network;VPN;GTK;
+Keywords=vpn;fortinet;fortigate;ssl;
+StartupNotify=true

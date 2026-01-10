@@ -1,0 +1,60 @@
+version: '3'
+
+vars:
+  BINARY: openfortivpn-gui
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build the application
+    cmds:
+      - go build -o {{.BINARY}} ./cmd/openfortivpn-gui
+    sources:
+      - '**/*.go'
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BINARY}}'
+
+  run:
+    desc: Run the application
+    cmds:
+      - go run ./cmd/openfortivpn-gui
+
+  test:
+    desc: Run all tests with race detector
+    cmds:
+      - go test -race ./...
+
+  test:verbose:
+    desc: Run all tests with verbose output
+    cmds:
+      - go test -race -v ./...
+
+  test:coverage:
+    desc: Run tests with coverage report
+    cmds:
+      - go test -race -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+      - echo "Coverage report generated at coverage.html"
+
+  lint:
+    desc: Run static analysis
+    cmds:
+      - go vet ./...
+
+  fmt:
+    desc: Format Go source files
+    cmds:
+      - go fmt ./...
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -f {{.BINARY}}
+      - rm -f coverage.out coverage.html
