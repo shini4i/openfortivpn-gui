@@ -1,5 +1,5 @@
 # Build artifacts
-openfortivpn-gui
+/openfortivpn-gui
 
 # Test coverage
 coverage.out
