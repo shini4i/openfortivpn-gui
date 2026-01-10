@@ -18,6 +18,8 @@
             go-task
             pkg-config
             gobject-introspection
+            golangci-lint
+            gosec
           ];
 
           buildInputs = with pkgs; [
