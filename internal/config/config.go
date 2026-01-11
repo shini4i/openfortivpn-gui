@@ -78,6 +78,7 @@ func (p *Paths) EnsurePaths() error {
 
 // Load reads the configuration from disk.
 func Load(path string) (*Config, error) {
+	// #nosec G304 -- path is from GetPaths() using XDG config directory
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
