@@ -16,7 +16,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
-      id-token: write
       contents: read
 
     steps:
@@ -28,6 +27,8 @@ jobs:
 
       - name: Setup Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
+        with:
+          use-flakehub: false
 
       - name: Setup Go cache
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
@@ -50,7 +51,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
-      id-token: write
       contents: read
 
     steps:
@@ -62,6 +62,8 @@ jobs:
 
       - name: Setup Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
+        with:
+          use-flakehub: false
 
       - name: Setup Go cache
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
