@@ -22,18 +22,17 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    container: fedora:42
     timeout-minutes: 45
     permissions:
       contents: read
 
     steps:
+      - name: Install dependencies
+        run: dnf install -y git gcc pkgconf tar gzip gtk4-devel libadwaita-devel libsecret-devel gobject-introspection-devel
+
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Install GTK4 dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libsecret-1-dev gobject-introspection
 
       - name: Setup Go
         uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
@@ -53,18 +52,17 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    container: fedora:42
     timeout-minutes: 45
     permissions:
       contents: read
 
     steps:
+      - name: Install dependencies
+        run: dnf install -y git gcc pkgconf tar gzip gtk4-devel libadwaita-devel libsecret-devel gobject-introspection-devel
+
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Install GTK4 dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libsecret-1-dev gobject-introspection
 
       - name: Setup Go
         uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
