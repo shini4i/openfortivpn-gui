@@ -21,7 +21,7 @@ func setupTestStore(t *testing.T) (*Store, func()) {
 	require.NoError(t, err)
 
 	cleanup := func() {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 	}
 
 	return store, cleanup
@@ -44,7 +44,7 @@ func validTestProfile() *Profile {
 func TestNewStore(t *testing.T) {
 	dir, err := os.MkdirTemp("", "store-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	storeDir := filepath.Join(dir, "profiles")
 	store, err := NewStore(storeDir)

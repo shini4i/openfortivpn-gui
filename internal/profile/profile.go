@@ -178,7 +178,11 @@ func validateHost(host string) error {
 		}
 		// Each character must be alphanumeric or hyphen
 		for _, r := range label {
-			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-') {
+			isLower := r >= 'a' && r <= 'z'
+			isUpper := r >= 'A' && r <= 'Z'
+			isDigit := r >= '0' && r <= '9'
+			isHyphen := r == '-'
+			if !isLower && !isUpper && !isDigit && !isHyphen {
 				return fmt.Errorf("invalid host: invalid character %q in hostname", r)
 			}
 		}

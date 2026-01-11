@@ -6,8 +6,9 @@ import (
 )
 
 // PreferencesWindow shows application preferences.
+// TODO: Migrate to PreferencesDialog when gotk4-adwaita bindings support it (libadwaita 1.5+)
 type PreferencesWindow struct {
-	window *adw.PreferencesWindow
+	window *adw.PreferencesWindow //nolint:staticcheck // PreferencesDialog not yet available in gotk4-adwaita bindings
 
 	// Settings widgets
 	notificationsSwitch *adw.SwitchRow
@@ -31,7 +32,7 @@ func NewPreferencesWindow(parent *MainWindow) *PreferencesWindow {
 
 // setupWindow creates the preferences window UI.
 func (pw *PreferencesWindow) setupWindow(parent *MainWindow) {
-	pw.window = adw.NewPreferencesWindow()
+	pw.window = adw.NewPreferencesWindow() //nolint:staticcheck // PreferencesDialog not yet available
 	pw.window.SetTitle("Preferences")
 	pw.window.SetModal(true)
 	pw.window.SetDefaultSize(400, 300)
@@ -68,7 +69,7 @@ func (pw *PreferencesWindow) setupWindow(parent *MainWindow) {
 	behaviorGroup.Add(pw.autoConnectSwitch)
 
 	generalPage.Add(behaviorGroup)
-	pw.window.Add(generalPage)
+	pw.window.Add(generalPage) //nolint:staticcheck // PreferencesDialog not yet available
 
 	// Handle window close to trigger callbacks
 	pw.window.ConnectCloseRequest(func() bool {

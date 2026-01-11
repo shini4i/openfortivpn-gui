@@ -116,7 +116,7 @@ func (s *Store) Save(p *Profile) error {
 		return fmt.Errorf("failed to write profile file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath) // Clean up temp file on failure
+		_ = os.Remove(tmpPath) // Clean up temp file on failure
 		return fmt.Errorf("failed to finalize profile file: %w", err)
 	}
 

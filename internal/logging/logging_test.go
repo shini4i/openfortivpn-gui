@@ -20,18 +20,18 @@ func TestSetup_Debug(t *testing.T) {
 func TestSetupFromEnv_Default(t *testing.T) {
 	// Save and restore environment
 	original := os.Getenv("OPENFORTIVPN_GUI_DEBUG")
-	defer os.Setenv("OPENFORTIVPN_GUI_DEBUG", original)
+	defer func() { _ = os.Setenv("OPENFORTIVPN_GUI_DEBUG", original) }()
 
-	os.Unsetenv("OPENFORTIVPN_GUI_DEBUG")
+	_ = os.Unsetenv("OPENFORTIVPN_GUI_DEBUG")
 	SetupFromEnv() // Should not panic, uses LevelInfo by default
 }
 
 func TestSetupFromEnv_Debug(t *testing.T) {
 	// Save and restore environment
 	original := os.Getenv("OPENFORTIVPN_GUI_DEBUG")
-	defer os.Setenv("OPENFORTIVPN_GUI_DEBUG", original)
+	defer func() { _ = os.Setenv("OPENFORTIVPN_GUI_DEBUG", original) }()
 
-	os.Setenv("OPENFORTIVPN_GUI_DEBUG", "1")
+	_ = os.Setenv("OPENFORTIVPN_GUI_DEBUG", "1")
 	SetupFromEnv() // Should not panic, uses LevelDebug
 }
 
