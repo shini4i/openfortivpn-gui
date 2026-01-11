@@ -43,6 +43,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
+      - name: Setup golangci-lint cache
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ~/.cache/golangci-lint
+          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-golangci-lint-
+
       - name: Run golangci-lint
         run: nix develop --command golangci-lint run
 
