@@ -116,7 +116,7 @@ func (s *Store) Save(p *Profile) error {
 		return fmt.Errorf("failed to write profile file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath) // Clean up temp file on failure
+		_ = os.Remove(tmpPath) // Clean up temp file on failure
 		return fmt.Errorf("failed to finalize profile file: %w", err)
 	}
 
@@ -134,6 +134,7 @@ func (s *Store) Load(id string) (*Profile, error) {
 		return nil, err
 	}
 
+	// #nosec G304 -- path is constructed from UUID-validated id via profilePath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -236,6 +237,7 @@ func (s *Store) List() (*ListResult, error) {
 // loadUnsafe loads a profile without acquiring locks (caller must hold lock).
 func (s *Store) loadUnsafe(id string) (*Profile, error) {
 	path := filepath.Join(s.baseDir, id+".json") // ID already validated by caller
+	// #nosec G304 -- path uses UUID-validated id within baseDir
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

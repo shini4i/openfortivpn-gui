@@ -1,0 +1,76 @@
+name: Quality Assurance
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/run-tests.yml"
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/run-tests.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run golangci-lint
+        run: nix develop --command golangci-lint run
+
+      - name: Run Gosec Security Scanner
+        run: nix develop --command gosec ./...
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Run tests with coverage
+        run: nix develop --command go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5.5.2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.out
+          fail_ci_if_error: false

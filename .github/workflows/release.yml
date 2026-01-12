@@ -1,0 +1,39 @@
+name: Release nix package
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  releaser-nixpkgs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install Nix
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
+
+      - name: Update nixpkgs
+        uses: shini4i/nixpkgs-updater@v1
+        with:
+          package-name: openfortivpn-gui
+          version: ${{ github.ref_name }}
+          target-repo: shini4i/nixpkgs
+          github-token: ${{ secrets.NIXPKGS_TOKEN }}
+
+  releaser-github:
+    needs: [releaser-nixpkgs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    name: github-releaser
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          generate_release_notes: true

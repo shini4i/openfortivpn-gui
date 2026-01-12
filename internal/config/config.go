@@ -78,6 +78,7 @@ func (p *Paths) EnsurePaths() error {
 
 // Load reads the configuration from disk.
 func Load(path string) (*Config, error) {
+	// #nosec G304 -- path is from GetPaths() using XDG config directory
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -107,7 +108,7 @@ func Save(path string, cfg *Config) error {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath) // Clean up temp file on failure
+		_ = os.Remove(tmpPath) // Clean up temp file on failure
 		return fmt.Errorf("failed to finalize config file: %w", err)
 	}
 

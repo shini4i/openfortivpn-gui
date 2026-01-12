@@ -25,14 +25,14 @@ func TestDefaultConfig(t *testing.T) {
 func TestGetPaths(t *testing.T) {
 	// Save and restore XDG_CONFIG_HOME
 	original := os.Getenv("XDG_CONFIG_HOME")
-	defer os.Setenv("XDG_CONFIG_HOME", original)
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", original) }()
 
 	t.Run("with XDG_CONFIG_HOME set", func(t *testing.T) {
 		tmpDir, err := os.MkdirTemp("", "config-test")
 		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
-		os.Setenv("XDG_CONFIG_HOME", tmpDir)
+		_ = os.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 		paths, err := GetPaths()
 		require.NoError(t, err)
@@ -43,7 +43,7 @@ func TestGetPaths(t *testing.T) {
 	})
 
 	t.Run("without XDG_CONFIG_HOME (uses HOME/.config)", func(t *testing.T) {
-		os.Setenv("XDG_CONFIG_HOME", "")
+		_ = os.Setenv("XDG_CONFIG_HOME", "")
 
 		paths, err := GetPaths()
 		require.NoError(t, err)
@@ -59,7 +59,7 @@ func TestGetPaths(t *testing.T) {
 func TestPaths_EnsurePaths(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "config-ensure-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	paths := &Paths{
 		ConfigDir:   filepath.Join(tmpDir, "openfortivpn-gui"),
@@ -78,7 +78,7 @@ func TestLoad(t *testing.T) {
 	t.Run("loads existing config", func(t *testing.T) {
 		tmpDir, err := os.MkdirTemp("", "config-load-test")
 		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configPath := filepath.Join(tmpDir, "config.json")
 		configContent := `{
@@ -116,7 +116,7 @@ func TestLoad(t *testing.T) {
 	t.Run("returns error for invalid JSON", func(t *testing.T) {
 		tmpDir, err := os.MkdirTemp("", "config-invalid-test")
 		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configPath := filepath.Join(tmpDir, "config.json")
 		err = os.WriteFile(configPath, []byte("invalid json {{{"), 0600)
@@ -132,7 +132,7 @@ func TestSave(t *testing.T) {
 	t.Run("saves config to file", func(t *testing.T) {
 		tmpDir, err := os.MkdirTemp("", "config-save-test")
 		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configPath := filepath.Join(tmpDir, "config.json")
 		cfg := &Config{
@@ -236,12 +236,12 @@ func TestManager_ConcurrentAccess(t *testing.T) {
 	// Set up temp directory for config
 	tmpDir, err := os.MkdirTemp("", "config-concurrent-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override XDG_CONFIG_HOME
 	original := os.Getenv("XDG_CONFIG_HOME")
-	os.Setenv("XDG_CONFIG_HOME", tmpDir)
-	defer os.Setenv("XDG_CONFIG_HOME", original)
+	_ = os.Setenv("XDG_CONFIG_HOME", tmpDir)
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", original) }()
 
 	manager, err := NewManager()
 	require.NoError(t, err)
@@ -303,12 +303,12 @@ func TestManager_GetConfigReturnsCopy(t *testing.T) {
 	// Set up temp directory for config
 	tmpDir, err := os.MkdirTemp("", "config-copy-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override XDG_CONFIG_HOME
 	original := os.Getenv("XDG_CONFIG_HOME")
-	os.Setenv("XDG_CONFIG_HOME", tmpDir)
-	defer os.Setenv("XDG_CONFIG_HOME", original)
+	_ = os.Setenv("XDG_CONFIG_HOME", tmpDir)
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", original) }()
 
 	manager, err := NewManager()
 	require.NoError(t, err)
@@ -327,11 +327,11 @@ func TestManager_GetConfigReturnsCopy(t *testing.T) {
 func TestManager_GetProfilesPath(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "config-profiles-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	original := os.Getenv("XDG_CONFIG_HOME")
-	os.Setenv("XDG_CONFIG_HOME", tmpDir)
-	defer os.Setenv("XDG_CONFIG_HOME", original)
+	_ = os.Setenv("XDG_CONFIG_HOME", tmpDir)
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", original) }()
 
 	manager, err := NewManager()
 	require.NoError(t, err)
@@ -343,11 +343,11 @@ func TestManager_GetProfilesPath(t *testing.T) {
 func TestManager_GetConfigDir(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "config-dir-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	original := os.Getenv("XDG_CONFIG_HOME")
-	os.Setenv("XDG_CONFIG_HOME", tmpDir)
-	defer os.Setenv("XDG_CONFIG_HOME", original)
+	_ = os.Setenv("XDG_CONFIG_HOME", tmpDir)
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", original) }()
 
 	manager, err := NewManager()
 	require.NoError(t, err)
@@ -359,11 +359,11 @@ func TestManager_GetConfigDir(t *testing.T) {
 func TestManager_SaveConfig(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "config-save-manager-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	original := os.Getenv("XDG_CONFIG_HOME")
-	os.Setenv("XDG_CONFIG_HOME", tmpDir)
-	defer os.Setenv("XDG_CONFIG_HOME", original)
+	_ = os.Setenv("XDG_CONFIG_HOME", tmpDir)
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", original) }()
 
 	manager, err := NewManager()
 	require.NoError(t, err)
@@ -391,11 +391,11 @@ func TestManager_SaveConfig(t *testing.T) {
 func TestManager_UpdateConfig_ValidationError(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "config-update-invalid-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	original := os.Getenv("XDG_CONFIG_HOME")
-	os.Setenv("XDG_CONFIG_HOME", tmpDir)
-	defer os.Setenv("XDG_CONFIG_HOME", original)
+	_ = os.Setenv("XDG_CONFIG_HOME", tmpDir)
+	defer func() { _ = os.Setenv("XDG_CONFIG_HOME", original) }()
 
 	manager, err := NewManager()
 	require.NoError(t, err)
@@ -416,7 +416,7 @@ func TestSave_AtomicWriteCleanup(t *testing.T) {
 	// the normal path works and leaves no temp files
 	tmpDir, err := os.MkdirTemp("", "config-atomic-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	configPath := filepath.Join(tmpDir, "config.json")
 	cfg := DefaultConfig()
@@ -437,7 +437,7 @@ func TestSave_AtomicWriteCleanup(t *testing.T) {
 func TestPaths_EnsurePaths_AlreadyExists(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "config-ensure-exists-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	paths := &Paths{
 		ConfigDir:   filepath.Join(tmpDir, "openfortivpn-gui"),
@@ -461,7 +461,7 @@ func TestLoad_ReadError(t *testing.T) {
 	// Test loading from a directory (should fail)
 	tmpDir, err := os.MkdirTemp("", "config-load-error-test")
 	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Try to load a directory as a file
 	_, err = Load(tmpDir)
@@ -473,11 +473,11 @@ func TestManager_UpdateField(t *testing.T) {
 	t.Run("atomically updates single field", func(t *testing.T) {
 		tmpDir, err := os.MkdirTemp("", "config-updatefield-test")
 		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		original := os.Getenv("XDG_CONFIG_HOME")
-		os.Setenv("XDG_CONFIG_HOME", tmpDir)
-		defer os.Setenv("XDG_CONFIG_HOME", original)
+		_ = os.Setenv("XDG_CONFIG_HOME", tmpDir)
+		defer func() { _ = os.Setenv("XDG_CONFIG_HOME", original) }()
 
 		manager, err := NewManager()
 		require.NoError(t, err)
@@ -499,11 +499,11 @@ func TestManager_UpdateField(t *testing.T) {
 	t.Run("rejects invalid config after mutation", func(t *testing.T) {
 		tmpDir, err := os.MkdirTemp("", "config-updatefield-invalid-test")
 		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		original := os.Getenv("XDG_CONFIG_HOME")
-		os.Setenv("XDG_CONFIG_HOME", tmpDir)
-		defer os.Setenv("XDG_CONFIG_HOME", original)
+		_ = os.Setenv("XDG_CONFIG_HOME", tmpDir)
+		defer func() { _ = os.Setenv("XDG_CONFIG_HOME", original) }()
 
 		manager, err := NewManager()
 		require.NoError(t, err)
@@ -523,11 +523,11 @@ func TestManager_UpdateField(t *testing.T) {
 	t.Run("persists changes to disk", func(t *testing.T) {
 		tmpDir, err := os.MkdirTemp("", "config-updatefield-persist-test")
 		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		original := os.Getenv("XDG_CONFIG_HOME")
-		os.Setenv("XDG_CONFIG_HOME", tmpDir)
-		defer os.Setenv("XDG_CONFIG_HOME", original)
+		_ = os.Setenv("XDG_CONFIG_HOME", tmpDir)
+		defer func() { _ = os.Setenv("XDG_CONFIG_HOME", original) }()
 
 		manager, err := NewManager()
 		require.NoError(t, err)

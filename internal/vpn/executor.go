@@ -116,6 +116,7 @@ func (p *realProcess) Kill() error {
 	// Process group is likely running as root (via pkexec).
 	// Use pkexec to send SIGTERM to the process group.
 	// The "--" ensures negative numbers aren't treated as options.
+	// #nosec G204 -- pgid is from syscall.Getpgid(), not user input
 	killCmd := exec.Command("pkexec", "kill", "-TERM", "--", fmt.Sprintf("-%d", pgid))
 	if err := killCmd.Run(); err != nil {
 		// Check if user cancelled the pkexec authentication dialog or pkexec
@@ -125,6 +126,7 @@ func (p *realProcess) Kill() error {
 			return fmt.Errorf("authentication cancelled or pkexec not available: %w", err)
 		}
 		// SIGTERM failed for another reason, try SIGKILL as last resort
+		// #nosec G204 -- pgid is from syscall.Getpgid(), not user input
 		killCmd = exec.Command("pkexec", "kill", "-KILL", "--", fmt.Sprintf("-%d", pgid))
 		if err := killCmd.Run(); err != nil {
 			if isPkexecCancellation(err) {
