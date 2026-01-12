@@ -7,12 +7,18 @@ on:
       - "**/*.go"
       - "go.mod"
       - "go.sum"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/run-tests.yml"
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
       - "**/*.go"
       - "go.mod"
       - "go.sum"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/run-tests.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,58 +28,45 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    container: fedora:42
     timeout-minutes: 45
     permissions:
       contents: read
 
     steps:
-      - name: Install dependencies
-        run: dnf install -y git gcc pkgconf tar gzip gtk4-devel libadwaita-devel libsecret-devel gobject-introspection-devel
-
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Fix git permissions
-        run: git config --global --add safe.directory $GITHUB_WORKSPACE
-
-      - name: Setup Go
-        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+      - name: Install Nix
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
         with:
-          go-version-file: go.mod
+          extra_nix_config: |
+            experimental-features = nix-command flakes
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
-        with:
-          version: v2.8.0
+        run: nix develop --command golangci-lint run
 
       - name: Run Gosec Security Scanner
-        run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.22.11
-          gosec ./...
+        run: nix develop --command gosec ./...
 
   test:
     name: Test
     runs-on: ubuntu-latest
-    container: fedora:42
     timeout-minutes: 45
     permissions:
       contents: read
 
     steps:
-      - name: Install dependencies
-        run: dnf install -y git gcc pkgconf tar gzip gtk4-devel libadwaita-devel libsecret-devel gobject-introspection-devel
-
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Setup Go
-        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+      - name: Install Nix
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
         with:
-          go-version-file: go.mod
+          extra_nix_config: |
+            experimental-features = nix-command flakes
 
       - name: Run tests with coverage
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: nix develop --command go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5.5.2
