@@ -231,7 +231,7 @@ func (s *Server) acceptLoop() {
 			continue
 		}
 
-		client := newClient(conn, s)
+		client := newClient(conn)
 		s.addClient(client)
 		go s.handleClient(client)
 	}
@@ -291,15 +291,13 @@ func (s *Server) handleClient(client *Client) {
 
 // Client represents a connected client.
 type Client struct {
-	conn   net.Conn
-	server *Server
-	mu     sync.Mutex
+	conn net.Conn
+	mu   sync.Mutex
 }
 
-func newClient(conn net.Conn, server *Server) *Client {
+func newClient(conn net.Conn) *Client {
 	return &Client{
-		conn:   conn,
-		server: server,
+		conn: conn,
 	}
 }
 

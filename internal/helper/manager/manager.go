@@ -4,11 +4,13 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/shini4i/openfortivpn-gui/internal/helper/protocol"
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
@@ -269,12 +271,22 @@ func (m *Manager) GetState() vpn.ConnectionState {
 	return m.controller.GetState()
 }
 
-// Shutdown gracefully disconnects if connected.
+// Shutdown gracefully disconnects the VPN if connected.
+// Uses a timeout to prevent hanging indefinitely.
 func (m *Manager) Shutdown() {
 	if m.controller.CanDisconnect() {
 		slog.Info("Disconnecting VPN before shutdown")
-		if err := m.controller.Disconnect(context.Background()); err != nil {
-			slog.Error("Failed to disconnect during shutdown", "error", err)
+
+		const shutdownTimeout = 10 * time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+
+		if err := m.controller.Disconnect(ctx); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				slog.Error("Disconnect timed out during shutdown", "timeout", shutdownTimeout)
+			} else {
+				slog.Error("Failed to disconnect during shutdown", "error", err)
+			}
 		}
 	}
 }
