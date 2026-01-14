@@ -50,7 +50,7 @@ func newTestConfigManager(t *testing.T, cfg *config.Config) (*config.Manager, fu
 
 	// Cleanup only needs to remove the temp directory; env is restored by t.Setenv
 	cleanup := func() {
-		os.RemoveAll(tempDir)
+		_ = os.RemoveAll(tempDir) // Explicitly ignore error - cleanup best effort
 	}
 
 	return cfgMgr, cleanup
