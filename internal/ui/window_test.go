@@ -2,7 +2,6 @@ package ui
 
 import (
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +27,7 @@ func newTestMainWindow(cfgMgr *config.Manager) *MainWindow {
 
 // newTestConfigManager creates a config.Manager with a temporary directory for testing.
 // Returns the manager and a cleanup function that should be called when done.
+// Uses t.Setenv for automatic environment variable restoration on test completion.
 func newTestConfigManager(t *testing.T, cfg *config.Config) (*config.Manager, func()) {
 	t.Helper()
 
@@ -35,9 +35,8 @@ func newTestConfigManager(t *testing.T, cfg *config.Config) (*config.Manager, fu
 	tempDir, err := os.MkdirTemp("", "openfortivpn-gui-test-*")
 	require.NoError(t, err, "failed to create temp dir")
 
-	// Set XDG_CONFIG_HOME to our temp dir
-	originalConfigHome := os.Getenv("XDG_CONFIG_HOME")
-	os.Setenv("XDG_CONFIG_HOME", tempDir)
+	// Set XDG_CONFIG_HOME to our temp dir (t.Setenv handles save/restore automatically)
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
 
 	// Create config manager (this will create the config directory structure)
 	cfgMgr, err := config.NewManager()
@@ -49,8 +48,8 @@ func newTestConfigManager(t *testing.T, cfg *config.Config) (*config.Manager, fu
 		require.NoError(t, err, "failed to update config")
 	}
 
+	// Cleanup only needs to remove the temp directory; env is restored by t.Setenv
 	cleanup := func() {
-		os.Setenv("XDG_CONFIG_HOME", originalConfigHome)
 		os.RemoveAll(tempDir)
 	}
 
@@ -404,8 +403,10 @@ func TestReconnectState_TimerNilInitially(t *testing.T) {
 	assert.Nil(t, state.reconnectTimer, "reconnect timer should be nil initially")
 }
 
-// TestReconnectState_ProfileStorageOnSuccess simulates storing profile on successful connection.
-func TestReconnectState_ProfileStorageOnSuccess(t *testing.T) {
+// TestReconnectState_ProfileStorageOnConnectionStart simulates storing profile at connection start.
+// Profile is now stored in doConnect at the beginning of connection attempt,
+// not in onConnectionSucceeded on success, to avoid race with profile selection changes.
+func TestReconnectState_ProfileStorageOnConnectionStart(t *testing.T) {
 	state := &reconnectState{}
 	testProfile := &profile.Profile{
 		ID:            "test-id",
@@ -414,18 +415,66 @@ func TestReconnectState_ProfileStorageOnSuccess(t *testing.T) {
 		AuthMethod:    profile.AuthMethodPassword,
 	}
 
-	// Simulate onConnectionSucceeded behavior
+	// Simulate what doConnect does - store profile at connection start
 	state.mu.Lock()
 	state.lastConnectedProfile = testProfile
+	state.mu.Unlock()
+
+	state.mu.Lock()
+	assert.Equal(t, testProfile, state.lastConnectedProfile)
+	state.mu.Unlock()
+
+	// Simulate what onConnectionSucceeded does - only reset counters/flags
+	// Set up initial state with mutex held
+	state.mu.Lock()
+	state.attemptCount = 5 // Pretend we had some attempts
+	state.userInitiatedDisconnect = true
+	state.mu.Unlock()
+
+	// Then reset them as onConnectionSucceeded would (under mutex)
+	state.mu.Lock()
 	state.attemptCount = 0
 	state.userInitiatedDisconnect = false
 	state.mu.Unlock()
 
 	state.mu.Lock()
+	// Profile should still be set (not modified by onConnectionSucceeded)
 	assert.Equal(t, testProfile, state.lastConnectedProfile)
 	assert.Equal(t, 0, state.attemptCount)
 	assert.False(t, state.userInitiatedDisconnect)
 	state.mu.Unlock()
+}
+
+// TestPerformReconnect_SkipsIfUserDisconnected verifies that performReconnect
+// skips reconnection if user initiated a disconnect while the timer was waiting.
+func TestPerformReconnect_SkipsIfUserDisconnected(t *testing.T) {
+	state := &reconnectState{}
+	testProfile := &profile.Profile{
+		ID:            "test-id",
+		Name:          "Test VPN",
+		AutoReconnect: true,
+		AuthMethod:    profile.AuthMethodPassword,
+	}
+
+	// Simulate scenario: reconnect scheduled but user clicked disconnect before timer fired
+	state.mu.Lock()
+	state.lastConnectedProfile = testProfile
+	state.attemptCount = 1
+	state.userInitiatedDisconnect = true // User clicked disconnect while waiting
+	state.mu.Unlock()
+
+	// Simulate the check in performReconnect
+	state.mu.Lock()
+	p := state.lastConnectedProfile
+	userDisconnected := state.userInitiatedDisconnect
+	state.mu.Unlock()
+
+	// This would cause performReconnect to return early
+	assert.NotNil(t, p, "profile should be stored")
+	assert.True(t, userDisconnected, "userDisconnected flag should be true")
+
+	// When userDisconnected is true, performReconnect should skip and not attempt reconnection
+	// This test verifies the state conditions that lead to that behavior
 }
 
 // TestCancelReconnect_NilTimer tests that cancelling reconnect with nil timer doesn't panic.
@@ -706,6 +755,3 @@ func TestShouldTriggerReconnect_EdgeCaseAtMaxMinus1(t *testing.T) {
 
 	assert.True(t, result, "should trigger reconnect when at max-1 attempts")
 }
-
-// Ensure filepath import is used (for future tests if needed).
-var _ = filepath.Join

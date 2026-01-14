@@ -566,6 +566,17 @@ func (w *MainWindow) doConnect(p *profile.Profile, opts *vpn.ConnectOptions) {
 	// Clear previous logs
 	w.logDialog.Clear()
 
+	// Store a copy of profile for potential reconnect at connection start.
+	// Using a copy avoids race conditions:
+	// 1. Profile selection changes in UI won't affect reconnection
+	// 2. Modifications to profile object won't affect stored reconnect target
+	if p != nil {
+		profileCopy := *p // Shallow copy is sufficient - Profile only contains value types
+		w.reconnectState.mu.Lock()
+		w.reconnectState.lastConnectedProfile = &profileCopy
+		w.reconnectState.mu.Unlock()
+	}
+
 	// Use app-level context for VPN connection (cancelled on app shutdown)
 	ctx := w.deps.Ctx
 	if ctx == nil {
@@ -674,16 +685,13 @@ func (w *MainWindow) OnProfileConnecting(callback func(profileID string)) {
 	w.onProfileConnecting = callback
 }
 
-// onConnectionSucceeded stores the connection info for potential reconnection.
+// onConnectionSucceeded resets reconnect state on successful connection.
 // Called when VPN successfully connects.
+// Note: Profile is stored in doConnect at connection start, not here.
 func (w *MainWindow) onConnectionSucceeded() {
 	w.reconnectState.mu.Lock()
 	defer w.reconnectState.mu.Unlock()
 
-	// Store profile for potential reconnect (guard against nil)
-	if w.selectedProfile != nil {
-		w.reconnectState.lastConnectedProfile = w.selectedProfile
-	}
 	// Reset attempt counter on successful connection
 	w.reconnectState.attemptCount = 0
 	// Clear user-initiated flag
@@ -788,7 +796,13 @@ func (w *MainWindow) performReconnect() {
 	w.reconnectState.mu.Lock()
 	p := w.reconnectState.lastConnectedProfile
 	attempt := w.reconnectState.attemptCount
+	userDisconnected := w.reconnectState.userInitiatedDisconnect
 	w.reconnectState.mu.Unlock()
+
+	if userDisconnected {
+		slog.Debug("Skipping reconnect: user initiated disconnect during timer wait")
+		return
+	}
 
 	if p == nil {
 		slog.Error("Cannot reconnect: no profile stored")
