@@ -69,13 +69,17 @@ func (s *Server) Start() error {
 
 	// Set socket group ownership for access control
 	if err := s.setSocketOwnership(); err != nil {
-		listener.Close()
+		if closeErr := listener.Close(); closeErr != nil {
+			slog.Error("Failed to close listener after ownership error", "error", closeErr)
+		}
 		return fmt.Errorf("failed to set socket ownership: %w", err)
 	}
 
 	// Set socket permissions (readable/writable by owner and group)
 	if err := os.Chmod(s.socketPath, 0660); err != nil {
-		listener.Close()
+		if closeErr := listener.Close(); closeErr != nil {
+			slog.Error("Failed to close listener after chmod error", "error", closeErr)
+		}
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 
@@ -136,16 +140,22 @@ func (s *Server) Stop() error {
 
 	// Close listener to stop accept loop
 	if listener != nil {
-		listener.Close()
+		if err := listener.Close(); err != nil {
+			slog.Error("Failed to close listener", "error", err)
+		}
 	}
 
 	// Close all client connections (outside of lock to prevent deadlock)
 	for _, client := range clients {
-		client.Close()
+		if err := client.Close(); err != nil {
+			slog.Warn("Failed to close client connection", "error", err)
+		}
 	}
 
 	// Remove socket file
-	os.Remove(s.socketPath)
+	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("Failed to remove socket file", "path", s.socketPath, "error", err)
+	}
 
 	slog.Info("Server stopped")
 	return nil
@@ -206,7 +216,9 @@ func (s *Server) removeClient(client *Client) {
 
 func (s *Server) handleClient(client *Client) {
 	defer func() {
-		client.Close()
+		if err := client.Close(); err != nil {
+			slog.Debug("Failed to close client connection", "error", err)
+		}
 		s.removeClient(client)
 	}()
 

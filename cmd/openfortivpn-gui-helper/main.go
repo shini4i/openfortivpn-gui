@@ -90,7 +90,9 @@ func main() {
 
 	// Graceful shutdown
 	mgr.Shutdown()
-	srv.Stop()
+	if err := srv.Stop(); err != nil {
+		slog.Error("Error stopping server", "error", err)
+	}
 
 	slog.Info("Shutdown complete")
 }
@@ -112,7 +114,11 @@ func notifySystemd(state string) {
 		slog.Warn("Failed to connect to notify socket", "error", err)
 		return
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			slog.Debug("Failed to close notify socket", "error", err)
+		}
+	}()
 
 	if _, err := conn.Write([]byte(state)); err != nil {
 		slog.Warn("Failed to notify systemd", "error", err)

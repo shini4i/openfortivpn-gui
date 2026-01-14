@@ -78,7 +78,9 @@ func NewHelperClientWithPath(socketPath string) (*HelperClient, error) {
 
 	// Sync initial state
 	if err := client.syncState(); err != nil {
-		client.Close()
+		if closeErr := client.Close(); closeErr != nil {
+			slog.Warn("Failed to close client after sync error", "error", closeErr)
+		}
 		return nil, err
 	}
 
@@ -96,7 +98,7 @@ func IsHelperAvailableAt(socketPath string) bool {
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	_ = conn.Close() // Error intentionally ignored; we only check connectivity
 	return true
 }
 

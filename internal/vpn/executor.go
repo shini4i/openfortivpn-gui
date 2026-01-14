@@ -98,11 +98,11 @@ type realProcess struct {
 }
 
 func (p *realProcess) Start() error {
-	return p.cmdWithPipes.cmd.Start()
+	return p.cmd.Start()
 }
 
 func (p *realProcess) Wait() error {
-	return p.cmdWithPipes.cmd.Wait()
+	return p.cmd.Wait()
 }
 
 // Kill terminates the process and all its children by killing the process group.
@@ -114,11 +114,11 @@ func (p *realProcess) Wait() error {
 // process group, ensuring child processes (openfortivpn spawned by pkexec)
 // are also terminated.
 func (p *realProcess) Kill() error {
-	if p.cmdWithPipes.cmd.Process == nil {
+	if p.cmd.Process == nil {
 		return nil
 	}
 
-	pgid := p.cmdWithPipes.cmd.Process.Pid
+	pgid := p.cmd.Process.Pid
 
 	// First try sending SIGTERM to the entire process group directly.
 	// This works if the process is running as the same user.
@@ -169,15 +169,15 @@ func isPkexecCancellation(err error) bool {
 }
 
 func (p *realProcess) Stdin() io.WriteCloser {
-	return p.cmdWithPipes.stdin
+	return p.stdin
 }
 
 func (p *realProcess) Stdout() io.ReadCloser {
-	return p.cmdWithPipes.stdout
+	return p.stdout
 }
 
 func (p *realProcess) Stderr() io.ReadCloser {
-	return p.cmdWithPipes.stderr
+	return p.stderr
 }
 
 // DirectExecutor implements ProcessExecutor for privileged contexts.
@@ -208,21 +208,21 @@ type directProcess struct {
 }
 
 func (p *directProcess) Start() error {
-	return p.cmdWithPipes.cmd.Start()
+	return p.cmd.Start()
 }
 
 func (p *directProcess) Wait() error {
-	return p.cmdWithPipes.cmd.Wait()
+	return p.cmd.Wait()
 }
 
 // Kill terminates the process and all its children by killing the process group.
 // Since the helper daemon runs as root, we can send signals directly without pkexec.
 func (p *directProcess) Kill() error {
-	if p.cmdWithPipes.cmd.Process == nil {
+	if p.cmd.Process == nil {
 		return nil
 	}
 
-	pgid := p.cmdWithPipes.cmd.Process.Pid
+	pgid := p.cmd.Process.Pid
 
 	// Send SIGTERM to the entire process group.
 	// Using negative pgid kills all processes in the group.
@@ -245,13 +245,13 @@ func (p *directProcess) Kill() error {
 }
 
 func (p *directProcess) Stdin() io.WriteCloser {
-	return p.cmdWithPipes.stdin
+	return p.stdin
 }
 
 func (p *directProcess) Stdout() io.ReadCloser {
-	return p.cmdWithPipes.stdout
+	return p.stdout
 }
 
 func (p *directProcess) Stderr() io.ReadCloser {
-	return p.cmdWithPipes.stderr
+	return p.stderr
 }
