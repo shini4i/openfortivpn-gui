@@ -25,7 +25,7 @@ const (
 type MainWindowDeps struct {
 	ProfileStore  profile.StoreInterface
 	KeyringStore  keyring.Store
-	VPNController *vpn.Controller
+	VPNController vpn.VPNController
 	ConfigManager *config.Manager
 	Tray          *TrayIcon
 	Notifier      *Notifier

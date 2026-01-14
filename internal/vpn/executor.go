@@ -162,3 +162,104 @@ func (p *realProcess) Stdout() io.ReadCloser {
 func (p *realProcess) Stderr() io.ReadCloser {
 	return p.stderr
 }
+
+// DirectExecutor implements ProcessExecutor for privileged contexts.
+// Unlike RealExecutor, it runs commands directly without pkexec wrapper,
+// as it's intended for use by the helper daemon which already runs as root.
+type DirectExecutor struct{}
+
+// NewDirectExecutor creates a new DirectExecutor.
+func NewDirectExecutor() *DirectExecutor {
+	return &DirectExecutor{}
+}
+
+// CreateProcess creates a process without privilege escalation.
+// This is used by the helper daemon which already runs with root privileges.
+func (e *DirectExecutor) CreateProcess(ctx context.Context, name string, args ...string) (Process, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+
+	// Start process in its own process group so we can kill all children
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	return &directProcess{
+		cmd:    cmd,
+		stdin:  stdin,
+		stdout: stdout,
+		stderr: stderr,
+	}, nil
+}
+
+// directProcess wraps exec.Cmd for privileged execution contexts.
+// Unlike realProcess, it can kill processes directly without pkexec.
+type directProcess struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr io.ReadCloser
+}
+
+func (p *directProcess) Start() error {
+	return p.cmd.Start()
+}
+
+func (p *directProcess) Wait() error {
+	return p.cmd.Wait()
+}
+
+// Kill terminates the process and all its children by killing the process group.
+// Since the helper daemon runs as root, we can send signals directly without pkexec.
+func (p *directProcess) Kill() error {
+	if p.cmd.Process == nil {
+		return nil
+	}
+
+	pgid := p.cmd.Process.Pid
+
+	// Send SIGTERM to the entire process group.
+	// Using negative pgid kills all processes in the group.
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err == nil {
+		return nil
+	} else if err == syscall.ESRCH {
+		// Process/group already terminated - nothing to do
+		return nil
+	}
+
+	// SIGTERM failed, try SIGKILL as last resort
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		if err == syscall.ESRCH {
+			return nil
+		}
+		return fmt.Errorf("failed to kill process group: %w", err)
+	}
+
+	return nil
+}
+
+func (p *directProcess) Stdin() io.WriteCloser {
+	return p.stdin
+}
+
+func (p *directProcess) Stdout() io.ReadCloser {
+	return p.stdout
+}
+
+func (p *directProcess) Stderr() io.ReadCloser {
+	return p.stderr
+}

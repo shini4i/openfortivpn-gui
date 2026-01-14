@@ -3,6 +3,7 @@ package ui
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os/exec"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
+	"github.com/shini4i/openfortivpn-gui/internal/client"
 	"github.com/shini4i/openfortivpn-gui/internal/config"
 	"github.com/shini4i/openfortivpn-gui/internal/keyring"
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
@@ -36,7 +38,10 @@ type App struct {
 	configManager *config.Manager
 	profileStore  *profile.Store
 	keyringStore  keyring.Store
-	vpnController *vpn.Controller
+	vpnController vpn.VPNController
+
+	// usingHelper indicates if we're using the helper daemon (for proper cleanup)
+	usingHelper bool
 
 	// Notification manager
 	notifier *Notifier
@@ -85,17 +90,35 @@ func NewApp(cfg *AppConfig) (*App, error) {
 		slog.Debug("openfortivpn found", "path", openfortivpnPath)
 	}
 
-	// Initialize VPN controller
-	vpnController := vpn.NewController(openfortivpnPath)
-
 	// Create application-level context for VPN operations
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Initialize VPN controller - prefer helper daemon if available
+	var vpnController vpn.VPNController
+	var usingHelper bool
+
+	if client.IsHelperAvailable() {
+		helperClient, err := client.NewHelperClient()
+		if err != nil {
+			slog.Warn("Helper daemon available but connection failed, falling back to pkexec mode",
+				"error", err)
+			vpnController = vpn.NewController(openfortivpnPath)
+		} else {
+			slog.Info("Using helper daemon for VPN operations (no password prompts)")
+			vpnController = helperClient
+			usingHelper = true
+		}
+	} else {
+		slog.Info("Helper daemon not available, using pkexec mode (password prompts required)")
+		vpnController = vpn.NewController(openfortivpnPath)
+	}
 
 	app := &App{
 		configManager: configManager,
 		profileStore:  profileStore,
 		keyringStore:  keyringStore,
 		vpnController: vpnController,
+		usingHelper:   usingHelper,
 		ctx:           ctx,
 		ctxCancel:     cancel,
 	}
@@ -228,7 +251,7 @@ func (a *App) registerAccelerators() {
 
 // GetVPNController returns the VPN controller instance.
 // This is useful for testing and external state monitoring.
-func (a *App) GetVPNController() *vpn.Controller {
+func (a *App) GetVPNController() vpn.VPNController {
 	return a.vpnController
 }
 
@@ -395,12 +418,23 @@ func (a *App) onShutdown() {
 		a.ctxCancel()
 	}
 
-	// Disconnect VPN if connected
-	state := a.vpnController.GetState()
-	if state.CanDisconnect() {
-		slog.Info("Disconnecting VPN before shutdown")
-		if err := a.vpnController.Disconnect(); err != nil {
-			slog.Error("Error disconnecting VPN", "error", err)
+	// Disconnect VPN if connected (only in direct mode - helper manages its own connections)
+	if !a.usingHelper {
+		state := a.vpnController.GetState()
+		if state.CanDisconnect() {
+			slog.Info("Disconnecting VPN before shutdown")
+			if err := a.vpnController.Disconnect(); err != nil {
+				slog.Error("Error disconnecting VPN", "error", err)
+			}
+		}
+	}
+
+	// Close helper client connection if using helper mode
+	if a.usingHelper {
+		if closer, ok := a.vpnController.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				slog.Error("Error closing helper client", "error", err)
+			}
 		}
 	}
 
