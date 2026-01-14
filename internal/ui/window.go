@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/diamondburned/gotk4-adwaita/pkg/adw"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
@@ -20,6 +22,15 @@ const (
 	windowDefaultWidth  = 900
 	windowDefaultHeight = 600
 )
+
+// reconnectState tracks auto-reconnection state for the current session.
+type reconnectState struct {
+	mu                      sync.Mutex
+	attemptCount            int
+	reconnectTimer          *time.Timer
+	userInitiatedDisconnect bool
+	lastConnectedProfile    *profile.Profile
+}
 
 // MainWindowDeps holds the dependencies required by MainWindow.
 type MainWindowDeps struct {
@@ -50,6 +61,9 @@ type MainWindow struct {
 	// State
 	selectedProfile *profile.Profile
 
+	// Reconnect state
+	reconnectState *reconnectState
+
 	// Callbacks
 	onProfileConnecting func(profileID string)
 }
@@ -57,7 +71,8 @@ type MainWindow struct {
 // NewMainWindow creates a new main window instance.
 func NewMainWindow(app *adw.Application, deps *MainWindowDeps) *MainWindow {
 	w := &MainWindow{
-		deps: deps,
+		deps:           deps,
+		reconnectState: &reconnectState{},
 	}
 
 	w.setupWindow(app)
@@ -244,11 +259,23 @@ func (w *MainWindow) setupCallbacks() {
 
 	// VPN state change callback
 	w.deps.VPNController.OnStateChange(func(oldState, newState vpn.ConnectionState) {
+		// Store profile reference on successful connection
+		if newState == vpn.StateConnected {
+			w.onConnectionSucceeded()
+		}
+
+		// Determine display state (may override to Reconnecting)
+		displayState := newState
+		if w.shouldTriggerReconnect(oldState, newState) {
+			w.startReconnectSequence()
+			displayState = vpn.StateReconnecting
+		}
+
 		// Update UI on main thread
-		w.statusDisplay.SetState(newState)
+		w.statusDisplay.SetState(displayState)
 
 		// Update connect button state
-		w.updateConnectButton(newState)
+		w.updateConnectButton(displayState)
 
 		// Get profile name for notifications
 		profileName := ""
@@ -258,7 +285,7 @@ func (w *MainWindow) setupCallbacks() {
 
 		// Update tray
 		if w.deps.Tray != nil {
-			w.deps.Tray.SetState(newState)
+			w.deps.Tray.SetState(displayState)
 			if profileName != "" {
 				w.deps.Tray.SetProfileName(profileName)
 			}
@@ -269,7 +296,7 @@ func (w *MainWindow) setupCallbacks() {
 			if profileName == "" {
 				profileName = "VPN"
 			}
-			switch newState {
+			switch displayState {
 			case vpn.StateConnected:
 				w.deps.Notifier.NotifyConnected(profileName)
 			case vpn.StateDisconnected:
@@ -551,7 +578,16 @@ func (w *MainWindow) doConnect(p *profile.Profile, opts *vpn.ConnectOptions) {
 }
 
 // disconnect terminates the active VPN connection.
+// Sets userInitiatedDisconnect flag to prevent auto-reconnect.
 func (w *MainWindow) disconnect() {
+	// Mark as user-initiated to prevent auto-reconnect
+	w.reconnectState.mu.Lock()
+	w.reconnectState.userInitiatedDisconnect = true
+	w.reconnectState.mu.Unlock()
+
+	// Cancel any pending reconnect
+	w.cancelReconnect()
+
 	if err := w.deps.VPNController.Disconnect(context.Background()); err != nil {
 		w.showError("Disconnect Error", err.Error())
 	}
@@ -636,6 +672,184 @@ func (w *MainWindow) selectProfileByID(profileID string) {
 // The callback receives the profile ID being connected to.
 func (w *MainWindow) OnProfileConnecting(callback func(profileID string)) {
 	w.onProfileConnecting = callback
+}
+
+// onConnectionSucceeded stores the connection info for potential reconnection.
+// Called when VPN successfully connects.
+func (w *MainWindow) onConnectionSucceeded() {
+	w.reconnectState.mu.Lock()
+	defer w.reconnectState.mu.Unlock()
+
+	// Store profile for potential reconnect (guard against nil)
+	if w.selectedProfile != nil {
+		w.reconnectState.lastConnectedProfile = w.selectedProfile
+	}
+	// Reset attempt counter on successful connection
+	w.reconnectState.attemptCount = 0
+	// Clear user-initiated flag
+	w.reconnectState.userInitiatedDisconnect = false
+}
+
+// shouldTriggerReconnect determines if an auto-reconnect should be initiated.
+// Returns true if the disconnect was unexpected and reconnection is allowed.
+func (w *MainWindow) shouldTriggerReconnect(oldState, newState vpn.ConnectionState) bool {
+	// Only trigger on unexpected disconnect from Connected state
+	if oldState != vpn.StateConnected || newState != vpn.StateDisconnected {
+		return false
+	}
+
+	w.reconnectState.mu.Lock()
+	defer w.reconnectState.mu.Unlock()
+
+	// Check if user initiated the disconnect
+	if w.reconnectState.userInitiatedDisconnect {
+		w.reconnectState.userInitiatedDisconnect = false // Reset flag
+		slog.Debug("Skipping auto-reconnect: user-initiated disconnect")
+		return false
+	}
+
+	// Check if we have a profile to reconnect
+	p := w.reconnectState.lastConnectedProfile
+	if p == nil {
+		slog.Debug("Skipping auto-reconnect: no profile stored")
+		return false
+	}
+
+	// Check if auto-reconnect is enabled for this profile
+	if !p.AutoReconnect {
+		slog.Debug("Skipping auto-reconnect: disabled for profile", "profile", p.Name)
+		return false
+	}
+
+	// Skip OTP profiles - they require fresh OTP each time
+	if p.AuthMethod == profile.AuthMethodOTP {
+		slog.Debug("Skipping auto-reconnect: OTP authentication requires user input", "profile", p.Name)
+		return false
+	}
+
+	// Check max attempts (guard against nil ConfigManager)
+	if w.deps.ConfigManager == nil {
+		slog.Debug("Skipping auto-reconnect: no config manager")
+		return false
+	}
+	cfg := w.deps.ConfigManager.GetConfig()
+	if w.reconnectState.attemptCount >= cfg.MaxReconnectAttempts {
+		slog.Warn("Max reconnect attempts reached",
+			"profile", p.Name,
+			"attempts", w.reconnectState.attemptCount,
+			"max", cfg.MaxReconnectAttempts)
+		return false
+	}
+
+	return true
+}
+
+// startReconnectSequence begins the auto-reconnection process.
+// Increments attempt counter and schedules a reconnection after the configured delay.
+func (w *MainWindow) startReconnectSequence() {
+	// Default delay if no config manager (should not happen in normal flow)
+	delay := 5 * time.Second
+	maxAttempts := 3
+	if w.deps.ConfigManager != nil {
+		cfg := w.deps.ConfigManager.GetConfig()
+		delay = time.Duration(cfg.ReconnectDelaySeconds) * time.Second
+		maxAttempts = cfg.MaxReconnectAttempts
+	}
+
+	w.reconnectState.mu.Lock()
+	w.reconnectState.attemptCount++
+	attempt := w.reconnectState.attemptCount
+	profileName := ""
+	if w.reconnectState.lastConnectedProfile != nil {
+		profileName = w.reconnectState.lastConnectedProfile.Name
+	}
+
+	// Cancel any existing timer
+	if w.reconnectState.reconnectTimer != nil {
+		w.reconnectState.reconnectTimer.Stop()
+	}
+
+	// Schedule reconnect
+	w.reconnectState.reconnectTimer = time.AfterFunc(delay, func() {
+		glib.IdleAdd(w.performReconnect)
+	})
+	w.reconnectState.mu.Unlock()
+
+	slog.Info("Scheduling reconnect attempt",
+		"profile", profileName,
+		"attempt", attempt,
+		"max", maxAttempts,
+		"delay", delay)
+}
+
+// performReconnect attempts to reconnect to the last connected profile.
+// Must be called on the GTK main thread (via glib.IdleAdd).
+func (w *MainWindow) performReconnect() {
+	w.reconnectState.mu.Lock()
+	p := w.reconnectState.lastConnectedProfile
+	attempt := w.reconnectState.attemptCount
+	w.reconnectState.mu.Unlock()
+
+	if p == nil {
+		slog.Error("Cannot reconnect: no profile stored")
+		return
+	}
+
+	slog.Info("Performing reconnect attempt", "profile", p.Name, "attempt", attempt)
+
+	// Get password from keyring (for non-SAML auth)
+	var opts *vpn.ConnectOptions
+	if p.AuthMethod == profile.AuthMethodSAML {
+		opts = &vpn.ConnectOptions{}
+	} else {
+		if w.deps.KeyringStore == nil {
+			slog.Error("Cannot reconnect: keyring store not available", "profile", p.Name)
+			w.statusDisplay.SetState(vpn.StateDisconnected)
+			if w.deps.Tray != nil {
+				w.deps.Tray.SetState(vpn.StateDisconnected)
+			}
+			return
+		}
+		password, err := w.deps.KeyringStore.Get(p.ID)
+		if err != nil || password == "" {
+			slog.Error("Cannot reconnect: password not available in keyring",
+				"profile", p.Name,
+				"error", err)
+			// Reset state to disconnected since we can't reconnect
+			w.statusDisplay.SetState(vpn.StateDisconnected)
+			if w.deps.Tray != nil {
+				w.deps.Tray.SetState(vpn.StateDisconnected)
+			}
+			return
+		}
+		opts = &vpn.ConnectOptions{Password: password}
+	}
+
+	// Clear previous logs for this attempt
+	w.logDialog.Clear()
+
+	// Perform the reconnection
+	ctx := w.deps.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := w.deps.VPNController.Connect(ctx, p, opts); err != nil {
+		slog.Error("Reconnect failed", "profile", p.Name, "error", err)
+		// Don't show error dialog during reconnect - let the state machine handle it
+	}
+}
+
+// cancelReconnect stops any pending reconnection attempt.
+func (w *MainWindow) cancelReconnect() {
+	w.reconnectState.mu.Lock()
+	defer w.reconnectState.mu.Unlock()
+
+	if w.reconnectState.reconnectTimer != nil {
+		w.reconnectState.reconnectTimer.Stop()
+		w.reconnectState.reconnectTimer = nil
+		slog.Debug("Cancelled pending reconnect")
+	}
 }
 
 // openBrowser opens the given URL in the default browser for SAML authentication.
