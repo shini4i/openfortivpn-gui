@@ -43,6 +43,9 @@ type HelperClient struct {
 	onEvent       func(event *vpn.OutputEvent)
 	onError       func(err error)
 
+	// writeMu serializes NDJSON writes to prevent interleaved JSON lines
+	writeMu sync.Mutex
+
 	// Pending requests waiting for responses
 	pendingMu sync.Mutex
 	pending   map[string]chan *protocol.Response
@@ -248,15 +251,20 @@ func (c *HelperClient) sendRequest(ctx context.Context, cmd protocol.Command, pa
 		c.pendingMu.Unlock()
 	}()
 
-	// Send request
+	// Send request - serialize writes to prevent interleaved JSON lines
+	c.writeMu.Lock()
 	data, err := json.Marshal(req)
 	if err != nil {
+		c.writeMu.Unlock()
 		return nil, err
 	}
 	data = append(data, '\n')
 
-	if _, err := c.conn.Write(data); err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
+	_, writeErr := c.conn.Write(data)
+	c.writeMu.Unlock()
+
+	if writeErr != nil {
+		return nil, fmt.Errorf("failed to send request: %w", writeErr)
 	}
 
 	// Wait for response
@@ -323,6 +331,16 @@ func (c *HelperClient) handleMessage(data []byte) {
 			return
 		}
 		c.handleEvent(&event)
+
+	default:
+		// Log unknown message types for debugging (forward compatibility)
+		truncatedData := string(data)
+		if len(truncatedData) > 200 {
+			truncatedData = truncatedData[:200] + "..."
+		}
+		slog.Warn("Unknown message type from helper",
+			"type", msg.Type,
+			"data", truncatedData)
 	}
 }
 

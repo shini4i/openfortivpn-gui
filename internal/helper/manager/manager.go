@@ -20,17 +20,24 @@ type EventBroadcaster func(event *protocol.Event)
 
 // Manager handles VPN operations and translates between the protocol and controller.
 type Manager struct {
-	controller  *vpn.Controller
+	controller  vpn.VPNController
 	broadcaster EventBroadcaster
 
 	mu                 sync.RWMutex
 	connectedProfileID string
 }
 
-// NewManager creates a new VPN manager.
+// NewManager creates a new VPN manager with a default controller.
+// This is a convenience wrapper around NewManagerWithController.
 func NewManager(openfortivpnPath string, broadcaster EventBroadcaster) *Manager {
+	return NewManagerWithController(vpn.NewControllerDirect(openfortivpnPath), broadcaster)
+}
+
+// NewManagerWithController creates a new VPN manager with the provided controller.
+// This constructor allows injecting a mock controller for testing.
+func NewManagerWithController(controller vpn.VPNController, broadcaster EventBroadcaster) *Manager {
 	m := &Manager{
-		controller:  vpn.NewControllerDirect(openfortivpnPath),
+		controller:  controller,
 		broadcaster: broadcaster,
 	}
 
@@ -131,6 +138,14 @@ func (m *Manager) handleConnect(req *protocol.Request) *protocol.Response {
 }
 
 // validateFilePath validates that a file path is safe and doesn't contain path traversal.
+// It defends against path traversal (../) and requires absolute paths.
+//
+// Security note: This function does NOT protect against symlink-based attacks where a
+// safe-looking path could point to sensitive files via symlinks. Preventing symlink attacks
+// requires additional filesystem checks (e.g., lstat/realpath resolution, ownership/permission
+// verification) that are outside the scope of this validation function. The caller should
+// ensure that the paths provided are from trusted sources or implement additional safeguards
+// if symlink attacks are a concern for the deployment environment.
 func validateFilePath(path string) error {
 	if path == "" {
 		return nil // Empty paths are allowed (optional fields)

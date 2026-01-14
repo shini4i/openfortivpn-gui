@@ -46,7 +46,11 @@ func NewServer(socketPath string, handler RequestHandler) *Server {
 }
 
 // NewServerWithGroup creates a new server instance with a custom socket group.
+// Panics if handler is nil to prevent runtime panic when processing requests.
 func NewServerWithGroup(socketPath, socketGroup string, handler RequestHandler) *Server {
+	if handler == nil {
+		panic("server: NewServerWithGroup called with nil handler")
+	}
 	return &Server{
 		socketPath:  socketPath,
 		socketGroup: socketGroup,
@@ -56,7 +60,16 @@ func NewServerWithGroup(socketPath, socketGroup string, handler RequestHandler) 
 }
 
 // Start begins listening for connections.
+// Returns an error if the server is already running.
 func (s *Server) Start() error {
+	// Guard against double-start
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return fmt.Errorf("server already running")
+	}
+	s.mu.Unlock()
+
 	// Remove existing socket file if it exists
 	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove existing socket: %w", err)
@@ -162,11 +175,18 @@ func (s *Server) Stop() error {
 }
 
 // Broadcast sends an event to all connected clients.
+// Clients are snapshotted before sending to avoid holding the lock during I/O.
 func (s *Server) Broadcast(event *protocol.Event) {
+	// Snapshot clients while holding the read lock
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	clients := make([]*Client, 0, len(s.clients))
 	for client := range s.clients {
+		clients = append(clients, client)
+	}
+	s.mu.RUnlock()
+
+	// Send events outside the lock to avoid blocking other operations
+	for _, client := range clients {
 		if err := client.SendEvent(event); err != nil {
 			slog.Warn("Failed to send event to client", "error", err)
 		}

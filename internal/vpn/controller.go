@@ -526,12 +526,19 @@ func (c *Controller) handleProcessCompletion(process Process) {
 // Disconnect terminates the active VPN connection.
 // Returns an error if the process cannot be killed (e.g., user cancelled
 // the pkexec authentication dialog).
+//
+// Note: The context parameter is checked for pre-cancellation only (ctx.Err() at entry).
+// It is not used to timeout or cancel the actual disconnect operations (process kill).
+// This is intentional because disconnect operations should complete to ensure clean
+// termination of the VPN process. The context parameter is provided for API consistency
+// with the VPNController interface and to allow callers to skip disconnect if their
+// context is already cancelled before the operation begins.
 func (c *Controller) Disconnect(ctx context.Context) error {
 	if !c.CanDisconnect() {
 		return fmt.Errorf("not connected: current state is %s", c.GetState())
 	}
 
-	// Check if context is already cancelled
+	// Check if context is already cancelled (pre-cancellation check only)
 	if err := ctx.Err(); err != nil {
 		return err
 	}

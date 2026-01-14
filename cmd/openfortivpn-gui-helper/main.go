@@ -88,8 +88,23 @@ func main() {
 	// Notify systemd we're stopping
 	notifySystemd("STOPPING=1")
 
-	// Graceful shutdown
-	mgr.Shutdown()
+	// Graceful shutdown with timeout to prevent hanging indefinitely
+	const shutdownTimeout = 10 * time.Second
+	shutdownDone := make(chan struct{})
+
+	go func() {
+		mgr.Shutdown()
+		close(shutdownDone)
+	}()
+
+	select {
+	case <-shutdownDone:
+		slog.Info("Manager shutdown completed")
+	case <-time.After(shutdownTimeout):
+		slog.Warn("Manager shutdown timed out", "timeout", shutdownTimeout)
+	}
+
+	// Always stop the server, even if manager shutdown timed out
 	if err := srv.Stop(); err != nil {
 		slog.Error("Error stopping server", "error", err)
 	}
