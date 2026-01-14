@@ -35,9 +35,10 @@ type Server struct {
 	listener    net.Listener
 	handler     RequestHandler
 
-	mu      sync.RWMutex
-	clients map[*Client]struct{}
-	running bool
+	mu       sync.RWMutex
+	clients  map[*Client]struct{}
+	running  bool
+	starting bool // Guards against TOCTOU race during Start()
 }
 
 // NewServer creates a new server instance with the default socket group.
@@ -60,23 +61,34 @@ func NewServerWithGroup(socketPath, socketGroup string, handler RequestHandler) 
 }
 
 // Start begins listening for connections.
-// Returns an error if the server is already running.
+// Returns an error if the server is already running or starting.
 func (s *Server) Start() error {
-	// Guard against double-start
+	// Guard against double-start using starting flag to prevent TOCTOU race
 	s.mu.Lock()
-	if s.running {
+	if s.running || s.starting {
 		s.mu.Unlock()
 		return fmt.Errorf("server already running")
 	}
+	s.starting = true
 	s.mu.Unlock()
 
+	// Helper to clear starting flag on error
+	clearStarting := func() {
+		s.mu.Lock()
+		s.starting = false
+		s.mu.Unlock()
+	}
+
+	// Perform filesystem/listen operations outside the lock
 	// Remove existing socket file if it exists
 	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
+		clearStarting()
 		return fmt.Errorf("failed to remove existing socket: %w", err)
 	}
 
 	listener, err := net.Listen("unix", s.socketPath)
 	if err != nil {
+		clearStarting()
 		return fmt.Errorf("failed to listen on socket: %w", err)
 	}
 
@@ -85,6 +97,7 @@ func (s *Server) Start() error {
 		if closeErr := listener.Close(); closeErr != nil {
 			slog.Error("Failed to close listener after ownership error", "error", closeErr)
 		}
+		clearStarting()
 		return fmt.Errorf("failed to set socket ownership: %w", err)
 	}
 
@@ -93,12 +106,15 @@ func (s *Server) Start() error {
 		if closeErr := listener.Close(); closeErr != nil {
 			slog.Error("Failed to close listener after chmod error", "error", closeErr)
 		}
+		clearStarting()
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 
+	// Finalize: set listener/running and clear starting under lock
 	s.mu.Lock()
 	s.listener = listener
 	s.running = true
+	s.starting = false
 	s.mu.Unlock()
 
 	slog.Info("Server started", "socket", s.socketPath, "group", s.socketGroup)

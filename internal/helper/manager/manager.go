@@ -171,6 +171,12 @@ func (m *Manager) handleDisconnect(req *protocol.Request) *protocol.Response {
 	}
 
 	if err := m.controller.Disconnect(context.Background()); err != nil {
+		// Clear connectedProfileID even on error - the connection may be
+		// effectively terminated even if the controller reports failure.
+		// This matches onStateChange cleanup behavior for edge cases.
+		m.mu.Lock()
+		m.connectedProfileID = ""
+		m.mu.Unlock()
 		return protocol.NewErrorResponse(req.ID, protocol.ErrCodeDisconnectFailed, err.Error())
 	}
 
