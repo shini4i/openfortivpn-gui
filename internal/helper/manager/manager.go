@@ -155,7 +155,7 @@ func (m *Manager) handleDisconnect(req *protocol.Request) *protocol.Response {
 			fmt.Sprintf("cannot disconnect: current state is %s", m.controller.GetState()))
 	}
 
-	if err := m.controller.Disconnect(); err != nil {
+	if err := m.controller.Disconnect(context.Background()); err != nil {
 		return protocol.NewErrorResponse(req.ID, protocol.ErrCodeDisconnectFailed, err.Error())
 	}
 
@@ -252,7 +252,7 @@ func (m *Manager) GetState() vpn.ConnectionState {
 func (m *Manager) Shutdown() {
 	if m.controller.CanDisconnect() {
 		slog.Info("Disconnecting VPN before shutdown")
-		if err := m.controller.Disconnect(); err != nil {
+		if err := m.controller.Disconnect(context.Background()); err != nil {
 			slog.Error("Failed to disconnect during shutdown", "error", err)
 		}
 	}

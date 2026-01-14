@@ -164,9 +164,13 @@ func (c *HelperClient) Connect(ctx context.Context, p *profile.Profile, opts *vp
 }
 
 // Disconnect terminates the active VPN connection.
-func (c *HelperClient) Disconnect() error {
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
-	defer cancel()
+// If ctx is nil, a default timeout context will be used.
+func (c *HelperClient) Disconnect(ctx context.Context) error {
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), DefaultTimeout)
+		defer cancel()
+	}
 
 	_, err := c.sendRequest(ctx, protocol.CommandDisconnect, protocol.DisconnectParams{})
 	return err
@@ -257,7 +261,10 @@ func (c *HelperClient) sendRequest(ctx context.Context, cmd protocol.Command, pa
 	select {
 	case resp := <-respChan:
 		if !resp.Success {
-			return nil, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+			if resp.Error != nil {
+				return nil, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+			}
+			return nil, errors.New("request failed with unknown error")
 		}
 		return resp, nil
 	case <-ctx.Done():

@@ -526,9 +526,14 @@ func (c *Controller) handleProcessCompletion(process Process) {
 // Disconnect terminates the active VPN connection.
 // Returns an error if the process cannot be killed (e.g., user cancelled
 // the pkexec authentication dialog).
-func (c *Controller) Disconnect() error {
+func (c *Controller) Disconnect(ctx context.Context) error {
 	if !c.CanDisconnect() {
 		return fmt.Errorf("not connected: current state is %s", c.GetState())
+	}
+
+	// Check if context is already cancelled
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	c.mu.Lock()

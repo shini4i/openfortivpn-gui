@@ -552,7 +552,7 @@ func (w *MainWindow) doConnect(p *profile.Profile, opts *vpn.ConnectOptions) {
 
 // disconnect terminates the active VPN connection.
 func (w *MainWindow) disconnect() {
-	if err := w.deps.VPNController.Disconnect(); err != nil {
+	if err := w.deps.VPNController.Disconnect(context.Background()); err != nil {
 		w.showError("Disconnect Error", err.Error())
 	}
 }

@@ -225,7 +225,9 @@ func (s *Server) handleClient(client *Client) {
 		if err := json.Unmarshal(line, &req); err != nil {
 			slog.Warn("Invalid request", "error", err)
 			resp := protocol.NewErrorResponse("", protocol.ErrCodeInvalidRequest, "invalid JSON")
-			client.SendResponse(resp)
+			if err := client.SendResponse(resp); err != nil {
+				slog.Warn("Failed to send error response", "error", err)
+			}
 			continue
 		}
 

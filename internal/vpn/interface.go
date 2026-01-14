@@ -31,8 +31,9 @@ type VPNController interface {
 	Connect(ctx context.Context, p *profile.Profile, opts *ConnectOptions) error
 
 	// Disconnect terminates the active VPN connection.
+	// The context can be used to cancel the disconnection attempt.
 	// Returns an error if disconnection fails.
-	Disconnect() error
+	Disconnect(ctx context.Context) error
 
 	// OnStateChange registers a callback that is invoked when the connection state changes.
 	// The callback receives the old and new connection states.

@@ -371,7 +371,7 @@ func (a *App) initTray() {
 				a.window.triggerDisconnect()
 			} else {
 				// Direct disconnect via controller when window doesn't exist
-				if err := a.vpnController.Disconnect(); err != nil {
+				if err := a.vpnController.Disconnect(context.Background()); err != nil {
 					slog.Error("Tray disconnect error", "error", err)
 				}
 			}
@@ -423,7 +423,7 @@ func (a *App) onShutdown() {
 		state := a.vpnController.GetState()
 		if state.CanDisconnect() {
 			slog.Info("Disconnecting VPN before shutdown")
-			if err := a.vpnController.Disconnect(); err != nil {
+			if err := a.vpnController.Disconnect(context.Background()); err != nil {
 				slog.Error("Error disconnecting VPN", "error", err)
 			}
 		}

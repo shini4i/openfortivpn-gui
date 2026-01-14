@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -101,15 +102,19 @@ func notifySystemd(state string) {
 		return
 	}
 
-	conn, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+	// Handle abstract sockets (prefixed with @) by replacing @ with null byte
+	if socketPath[0] == '@' {
+		socketPath = "\x00" + socketPath[1:]
+	}
+
+	conn, err := net.Dial("unixgram", socketPath)
 	if err != nil {
-		slog.Warn("Failed to create notify socket", "error", err)
+		slog.Warn("Failed to connect to notify socket", "error", err)
 		return
 	}
-	defer syscall.Close(conn)
+	defer conn.Close()
 
-	addr := &syscall.SockaddrUnix{Name: socketPath}
-	if err := syscall.Sendto(conn, []byte(state), 0, addr); err != nil {
+	if _, err := conn.Write([]byte(state)); err != nil {
 		slog.Warn("Failed to notify systemd", "error", err)
 	}
 }
