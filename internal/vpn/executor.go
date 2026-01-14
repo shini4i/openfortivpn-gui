@@ -30,18 +30,18 @@ type ProcessExecutor interface {
 	CreateProcess(ctx context.Context, name string, args ...string) (Process, error)
 }
 
-// RealExecutor implements ProcessExecutor using os/exec.
-type RealExecutor struct{}
-
-// NewRealExecutor creates a new RealExecutor.
-func NewRealExecutor() *RealExecutor {
-	return &RealExecutor{}
+// cmdWithPipes holds a command and its associated pipes.
+// This is used as the common base for both realProcess and directProcess.
+type cmdWithPipes struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr io.ReadCloser
 }
 
-// CreateProcess creates a real process using exec.CommandContext.
-// The process is started in its own process group to allow killing
-// all child processes when disconnecting.
-func (e *RealExecutor) CreateProcess(ctx context.Context, name string, args ...string) (Process, error) {
+// newCmdWithPipes creates a command with stdin/stdout/stderr pipes configured.
+// The process is started in its own process group to allow killing all child processes.
+func newCmdWithPipes(ctx context.Context, name string, args ...string) (*cmdWithPipes, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 
 	// Start process in its own process group so we can kill all children
@@ -64,7 +64,7 @@ func (e *RealExecutor) CreateProcess(ctx context.Context, name string, args ...s
 		return nil, err
 	}
 
-	return &realProcess{
+	return &cmdWithPipes{
 		cmd:    cmd,
 		stdin:  stdin,
 		stdout: stdout,
@@ -72,20 +72,37 @@ func (e *RealExecutor) CreateProcess(ctx context.Context, name string, args ...s
 	}, nil
 }
 
+// RealExecutor implements ProcessExecutor using os/exec.
+type RealExecutor struct{}
+
+// NewRealExecutor creates a new RealExecutor.
+func NewRealExecutor() *RealExecutor {
+	return &RealExecutor{}
+}
+
+// CreateProcess creates a real process using exec.CommandContext.
+// The process is started in its own process group to allow killing
+// all child processes when disconnecting.
+func (e *RealExecutor) CreateProcess(ctx context.Context, name string, args ...string) (Process, error) {
+	cwp, err := newCmdWithPipes(ctx, name, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	return &realProcess{cmdWithPipes: cwp}, nil
+}
+
 // realProcess wraps exec.Cmd to implement Process interface.
 type realProcess struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	stderr io.ReadCloser
+	*cmdWithPipes
 }
 
 func (p *realProcess) Start() error {
-	return p.cmd.Start()
+	return p.cmdWithPipes.cmd.Start()
 }
 
 func (p *realProcess) Wait() error {
-	return p.cmd.Wait()
+	return p.cmdWithPipes.cmd.Wait()
 }
 
 // Kill terminates the process and all its children by killing the process group.
@@ -97,11 +114,11 @@ func (p *realProcess) Wait() error {
 // process group, ensuring child processes (openfortivpn spawned by pkexec)
 // are also terminated.
 func (p *realProcess) Kill() error {
-	if p.cmd.Process == nil {
+	if p.cmdWithPipes.cmd.Process == nil {
 		return nil
 	}
 
-	pgid := p.cmd.Process.Pid
+	pgid := p.cmdWithPipes.cmd.Process.Pid
 
 	// First try sending SIGTERM to the entire process group directly.
 	// This works if the process is running as the same user.
@@ -152,15 +169,15 @@ func isPkexecCancellation(err error) bool {
 }
 
 func (p *realProcess) Stdin() io.WriteCloser {
-	return p.stdin
+	return p.cmdWithPipes.stdin
 }
 
 func (p *realProcess) Stdout() io.ReadCloser {
-	return p.stdout
+	return p.cmdWithPipes.stdout
 }
 
 func (p *realProcess) Stderr() io.ReadCloser {
-	return p.stderr
+	return p.cmdWithPipes.stderr
 }
 
 // DirectExecutor implements ProcessExecutor for privileged contexts.
@@ -176,61 +193,36 @@ func NewDirectExecutor() *DirectExecutor {
 // CreateProcess creates a process without privilege escalation.
 // This is used by the helper daemon which already runs with root privileges.
 func (e *DirectExecutor) CreateProcess(ctx context.Context, name string, args ...string) (Process, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-
-	// Start process in its own process group so we can kill all children
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
-
-	stdin, err := cmd.StdinPipe()
+	cwp, err := newCmdWithPipes(ctx, name, args...)
 	if err != nil {
 		return nil, err
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	return &directProcess{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: stdout,
-		stderr: stderr,
-	}, nil
+	return &directProcess{cmdWithPipes: cwp}, nil
 }
 
 // directProcess wraps exec.Cmd for privileged execution contexts.
 // Unlike realProcess, it can kill processes directly without pkexec.
 type directProcess struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	stderr io.ReadCloser
+	*cmdWithPipes
 }
 
 func (p *directProcess) Start() error {
-	return p.cmd.Start()
+	return p.cmdWithPipes.cmd.Start()
 }
 
 func (p *directProcess) Wait() error {
-	return p.cmd.Wait()
+	return p.cmdWithPipes.cmd.Wait()
 }
 
 // Kill terminates the process and all its children by killing the process group.
 // Since the helper daemon runs as root, we can send signals directly without pkexec.
 func (p *directProcess) Kill() error {
-	if p.cmd.Process == nil {
+	if p.cmdWithPipes.cmd.Process == nil {
 		return nil
 	}
 
-	pgid := p.cmd.Process.Pid
+	pgid := p.cmdWithPipes.cmd.Process.Pid
 
 	// Send SIGTERM to the entire process group.
 	// Using negative pgid kills all processes in the group.
@@ -253,13 +245,13 @@ func (p *directProcess) Kill() error {
 }
 
 func (p *directProcess) Stdin() io.WriteCloser {
-	return p.stdin
+	return p.cmdWithPipes.stdin
 }
 
 func (p *directProcess) Stdout() io.ReadCloser {
-	return p.stdout
+	return p.cmdWithPipes.stdout
 }
 
 func (p *directProcess) Stderr() io.ReadCloser {
-	return p.stderr
+	return p.cmdWithPipes.stderr
 }

@@ -98,14 +98,14 @@ func (m *Manager) handleConnect(req *protocol.Request) *protocol.Response {
 			fmt.Sprintf("invalid profile: %v", err))
 	}
 
-	// Check if we can connect
+	// Check if we can connect and store profile ID atomically to prevent race conditions
+	// where two concurrent connects could both pass CanConnect() check
+	m.mu.Lock()
 	if !m.controller.CanConnect() {
+		m.mu.Unlock()
 		return protocol.NewErrorResponse(req.ID, protocol.ErrCodeInvalidState,
 			fmt.Sprintf("cannot connect: current state is %s", m.controller.GetState()))
 	}
-
-	// Store profile ID for status queries
-	m.mu.Lock()
 	m.connectedProfileID = params.ProfileID
 	m.mu.Unlock()
 

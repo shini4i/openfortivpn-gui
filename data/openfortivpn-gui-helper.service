@@ -8,6 +8,7 @@ Type=notify
 ExecStart=/usr/bin/openfortivpn-gui-helper
 Restart=on-failure
 RestartSec=5
+Group=openfortivpn-gui
 
 # Security hardening
 NoNewPrivileges=false
@@ -18,11 +19,14 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 
+# Restrict Linux capabilities to the minimum required for VPN operations
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+
 # Runtime and state directories
 RuntimeDirectory=openfortivpn-gui
-RuntimeDirectoryMode=0755
+RuntimeDirectoryMode=0750
 StateDirectory=openfortivpn-gui
-StateDirectoryMode=0755
+StateDirectoryMode=0750
 
 # Watchdog
 WatchdogSec=30

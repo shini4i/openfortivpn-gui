@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/shini4i/openfortivpn-gui/internal/helper/manager"
 	"github.com/shini4i/openfortivpn-gui/internal/helper/protocol"
@@ -129,14 +130,12 @@ func watchdogLoop() {
 	}
 
 	// Notify at half the watchdog interval
-	interval := usec / 2
+	interval := time.Duration(usec/2) * time.Microsecond
 
-	for {
-		// Sleep for half the watchdog interval (convert from microseconds)
-		syscall.Select(0, nil, nil, nil, &syscall.Timeval{
-			Sec:  interval / 1000000,
-			Usec: interval % 1000000,
-		})
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
 		notifySystemd("WATCHDOG=1")
 	}
 }

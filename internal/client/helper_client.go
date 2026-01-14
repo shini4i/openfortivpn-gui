@@ -102,13 +102,14 @@ func IsHelperAvailableAt(socketPath string) bool {
 
 // Close closes the connection to the helper daemon.
 func (c *HelperClient) Close() error {
+	var closeErr error
 	c.closeOnce.Do(func() {
 		close(c.closeChan)
 		if c.conn != nil {
-			c.conn.Close()
+			closeErr = c.conn.Close()
 		}
 	})
-	return nil
+	return closeErr
 }
 
 // GetState returns the current connection state.

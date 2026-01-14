@@ -125,6 +125,13 @@ func (s *Server) Stop() error {
 	}
 	s.running = false
 	listener := s.listener
+
+	// Copy clients to slice while holding lock to avoid holding lock during Close() calls
+	// which could block and cause deadlock with other goroutines
+	clients := make([]*Client, 0, len(s.clients))
+	for client := range s.clients {
+		clients = append(clients, client)
+	}
 	s.mu.Unlock()
 
 	// Close listener to stop accept loop
@@ -132,12 +139,10 @@ func (s *Server) Stop() error {
 		listener.Close()
 	}
 
-	// Close all client connections
-	s.mu.RLock()
-	for client := range s.clients {
+	// Close all client connections (outside of lock to prevent deadlock)
+	for _, client := range clients {
 		client.Close()
 	}
-	s.mu.RUnlock()
 
 	// Remove socket file
 	os.Remove(s.socketPath)
