@@ -102,6 +102,7 @@ func (s *Server) Start() error {
 	}
 
 	// Set socket permissions (readable/writable by owner and group)
+	// #nosec G302 -- 0660 is intentional: group access required for unprivileged clients
 	if err := os.Chmod(s.socketPath, 0660); err != nil {
 		if closeErr := listener.Close(); closeErr != nil {
 			slog.Error("Failed to close listener after chmod error", "error", closeErr)
