@@ -25,6 +25,7 @@ type ConnectOptions struct {
 type Controller struct {
 	openfortivpnPath string
 	executor         ProcessExecutor
+	directMode       bool // When true, run openfortivpn directly without pkexec
 
 	mu         sync.RWMutex
 	state      ConnectionState
@@ -58,6 +59,18 @@ func NewControllerWithExecutor(openfortivpnPath string, executor ProcessExecutor
 	return &Controller{
 		openfortivpnPath: openfortivpnPath,
 		executor:         executor,
+		state:            StateDisconnected,
+	}
+}
+
+// NewControllerDirect creates a VPN controller that runs openfortivpn directly
+// without pkexec privilege escalation. This is intended for use by the helper
+// daemon which already runs with root privileges.
+func NewControllerDirect(openfortivpnPath string) *Controller {
+	return &Controller{
+		openfortivpnPath: openfortivpnPath,
+		executor:         NewDirectExecutor(),
+		directMode:       true,
 		state:            StateDisconnected,
 	}
 }
@@ -341,7 +354,9 @@ func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *Conn
 	return nil
 }
 
-// startProcess creates and starts the openfortivpn process via pkexec.
+// startProcess creates and starts the openfortivpn process.
+// In normal mode, it uses pkexec for privilege escalation.
+// In direct mode (helper daemon), it runs openfortivpn directly.
 // Returns the started process or an error. On error, the state is set to Failed.
 func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts *ConnectOptions) (Process, error) {
 	// Create cancellable context
@@ -349,12 +364,20 @@ func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts 
 	c.ctx = ctx
 	c.cancel = cancel
 
-	// Build command arguments and prepend openfortivpn path for pkexec
+	// Build command arguments
 	vpnArgs := c.buildCommandArgs(p, opts)
-	args := append([]string{c.openfortivpnPath}, vpnArgs...)
 
-	// Create process with pkexec for privilege escalation
-	process, err := c.executor.CreateProcess(ctx, "pkexec", args...)
+	// Create process - either directly or via pkexec
+	var process Process
+	var err error
+	if c.directMode {
+		// Direct mode: run openfortivpn directly (helper daemon already has root)
+		process, err = c.executor.CreateProcess(ctx, c.openfortivpnPath, vpnArgs...)
+	} else {
+		// Normal mode: use pkexec for privilege escalation
+		args := append([]string{c.openfortivpnPath}, vpnArgs...)
+		process, err = c.executor.CreateProcess(ctx, "pkexec", args...)
+	}
 	if err != nil {
 		c.ctx = nil
 		c.cancel = nil
@@ -503,9 +526,21 @@ func (c *Controller) handleProcessCompletion(process Process) {
 // Disconnect terminates the active VPN connection.
 // Returns an error if the process cannot be killed (e.g., user cancelled
 // the pkexec authentication dialog).
-func (c *Controller) Disconnect() error {
+//
+// Note: The context parameter is checked for pre-cancellation only (ctx.Err() at entry).
+// It is not used to timeout or cancel the actual disconnect operations (process kill).
+// This is intentional because disconnect operations should complete to ensure clean
+// termination of the VPN process. The context parameter is provided for API consistency
+// with the VPNController interface and to allow callers to skip disconnect if their
+// context is already cancelled before the operation begins.
+func (c *Controller) Disconnect(ctx context.Context) error {
 	if !c.CanDisconnect() {
 		return fmt.Errorf("not connected: current state is %s", c.GetState())
+	}
+
+	// Check if context is already cancelled (pre-cancellation check only)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	c.mu.Lock()

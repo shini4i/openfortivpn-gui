@@ -491,7 +491,7 @@ func TestController_ProcessOutput_Authenticate(t *testing.T) {
 func TestController_Disconnect_NotConnected(t *testing.T) {
 	ctrl := NewController("/usr/bin/openfortivpn")
 
-	err := ctrl.Disconnect()
+	err := ctrl.Disconnect(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not connected")
 }
@@ -856,7 +856,7 @@ func TestController_Disconnect_Success(t *testing.T) {
 	assert.Equal(t, StateConnecting, ctrl.GetState())
 
 	// Now disconnect
-	err = ctrl.Disconnect()
+	err = ctrl.Disconnect(context.Background())
 	require.NoError(t, err)
 
 	// Verify process was killed
@@ -896,7 +896,7 @@ func TestController_Disconnect_FromConnectedState(t *testing.T) {
 	}, 100*time.Millisecond, 10*time.Millisecond)
 
 	// Now disconnect
-	err = ctrl.Disconnect()
+	err = ctrl.Disconnect(context.Background())
 	require.NoError(t, err)
 
 	// Verify process was killed
@@ -933,7 +933,7 @@ func TestController_Disconnect_KillError(t *testing.T) {
 	assert.Equal(t, StateConnecting, ctrl.GetState())
 
 	// Now try to disconnect - should return the Kill error
-	err = ctrl.Disconnect()
+	err = ctrl.Disconnect(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to kill VPN process")
 	assert.Contains(t, err.Error(), "authentication cancelled")
