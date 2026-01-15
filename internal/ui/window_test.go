@@ -215,8 +215,7 @@ func TestShouldTriggerReconnect_OTPAuthMethod(t *testing.T) {
 // TestShouldTriggerReconnect_NoConfigManager tests that reconnect is not triggered
 // when ConfigManager is nil.
 func TestShouldTriggerReconnect_NoConfigManager(t *testing.T) {
-	w := newTestMainWindow(nil)
-	w.deps.ConfigManager = nil
+	w := newTestMainWindow(nil) // ConfigManager is already nil
 	w.reconnectState.userInitiatedDisconnect = false
 	w.reconnectState.lastConnectedProfile = &profile.Profile{
 		ID:            "test-profile-id",
@@ -393,9 +392,10 @@ func TestReconnectState_ProfileStorageOnConnectionStart(t *testing.T) {
 	state.mu.Unlock()
 }
 
-// TestPerformReconnect_SkipsIfUserDisconnected verifies that performReconnect
-// skips reconnection if user initiated a disconnect while the timer was waiting.
-func TestPerformReconnect_SkipsIfUserDisconnected(t *testing.T) {
+// TestReconnectState_SkipConditions verifies the reconnectState fields that
+// performReconnect checks to determine whether to skip reconnection.
+// This test validates state conditions rather than calling performReconnect directly.
+func TestReconnectState_SkipConditions(t *testing.T) {
 	state := &reconnectState{}
 	testProfile := &profile.Profile{
 		ID:            "test-id",
@@ -404,25 +404,24 @@ func TestPerformReconnect_SkipsIfUserDisconnected(t *testing.T) {
 		AuthMethod:    profile.AuthMethodPassword,
 	}
 
-	// Simulate scenario: reconnect scheduled but user clicked disconnect before timer fired
+	// Set up state: reconnect was scheduled but user clicked disconnect before timer fired
 	state.mu.Lock()
 	state.lastConnectedProfile = testProfile
 	state.attemptCount = 1
 	state.userInitiatedDisconnect = true // User clicked disconnect while waiting
 	state.mu.Unlock()
 
-	// Simulate the check in performReconnect
+	// Verify the state fields that performReconnect would check
 	state.mu.Lock()
 	p := state.lastConnectedProfile
 	userDisconnected := state.userInitiatedDisconnect
 	state.mu.Unlock()
 
-	// This would cause performReconnect to return early
+	// These are the conditions performReconnect checks before attempting reconnection
 	assert.NotNil(t, p, "profile should be stored")
 	assert.True(t, userDisconnected, "userDisconnected flag should be true")
 
-	// When userDisconnected is true, performReconnect should skip and not attempt reconnection
-	// This test verifies the state conditions that lead to that behavior
+	// When userInitiatedDisconnect is true, performReconnect skips reconnection
 }
 
 // TestCancelReconnect_NilTimer tests that cancelling reconnect with nil timer doesn't panic.
