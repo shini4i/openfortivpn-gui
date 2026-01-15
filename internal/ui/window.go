@@ -361,6 +361,14 @@ func (w *MainWindow) loadProfiles() {
 	// Try to select the last used profile (DefaultProfileID from config)
 	profileIDToSelect := w.getDefaultProfileID(result.Profiles)
 	w.profileList.SelectProfile(profileIDToSelect)
+
+	// Clear focus to prevent profile editor's name entry from being auto-selected.
+	// When a profile is selected, GTK's adw.EntryRow automatically receives focus and
+	// enters edit mode with text selected. Using IdleAdd ensures this runs after the
+	// selection callback completes, clearing the unwanted focus behavior.
+	glib.IdleAdd(func() {
+		w.window.SetFocus(nil)
+	})
 }
 
 // getDefaultProfileID returns the profile ID to select on startup.
@@ -441,6 +449,11 @@ func (w *MainWindow) performDeleteProfile(p *profile.Profile) {
 	if w.selectedProfile != nil && w.selectedProfile.ID == p.ID {
 		w.selectedProfile = nil
 		w.profileEditor.SetProfile(nil)
+		// Clear profile name from status display and tray
+		w.statusDisplay.SetProfileInfo("")
+		if w.deps.Tray != nil {
+			w.deps.Tray.SetProfileName("")
+		}
 	}
 
 	// Refresh the list
