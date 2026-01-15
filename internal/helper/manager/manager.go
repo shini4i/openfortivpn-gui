@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +17,24 @@ import (
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
+
+// sensitivePathPrefixes contains paths that should never be accessed via symlinks.
+// These paths contain sensitive system data that could leak information if read.
+var sensitivePathPrefixes = []string{
+	"/etc/shadow",
+	"/etc/gshadow",
+	"/etc/sudoers",
+	"/etc/passwd",
+	"/etc/group",
+	"/etc/ssh/",
+	"/etc/security/",
+	"/root/",
+	"/proc/",
+	"/sys/",
+	"/dev/",
+	"/boot/",
+	"/var/lib/secrets/",
+}
 
 // EventBroadcaster is called to broadcast events to all clients.
 type EventBroadcaster func(event *protocol.Event)
@@ -139,15 +158,14 @@ func (m *Manager) handleConnect(req *protocol.Request) *protocol.Response {
 	return resp
 }
 
-// validateFilePath validates that a file path is safe and doesn't contain path traversal.
-// It defends against path traversal (../) and requires absolute paths.
+// validateFilePath validates that a file path is safe for use with the VPN client.
+// It defends against:
+//   - Path traversal attacks (../)
+//   - Non-absolute paths
+//   - Symlink-based attacks pointing to sensitive system files
 //
-// Security note: This function does NOT protect against symlink-based attacks where a
-// safe-looking path could point to sensitive files via symlinks. Preventing symlink attacks
-// requires additional filesystem checks (e.g., lstat/realpath resolution, ownership/permission
-// verification) that are outside the scope of this validation function. The caller should
-// ensure that the paths provided are from trusted sources or implement additional safeguards
-// if symlink attacks are a concern for the deployment environment.
+// The function resolves symlinks and checks that the real path doesn't point to
+// sensitive system locations that could leak information through error messages.
 func validateFilePath(path string) error {
 	if path == "" {
 		return nil // Empty paths are allowed (optional fields)
@@ -163,7 +181,52 @@ func validateFilePath(path string) error {
 		return fmt.Errorf("path must be absolute")
 	}
 
+	// Resolve symlinks to get the real path
+	realPath, err := resolvePathSafely(path)
+	if err != nil {
+		// If the file doesn't exist, we can't resolve symlinks
+		// Allow it through - openfortivpn will handle the error appropriately
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to resolve path: %w", err)
+	}
+
+	// Check if resolved path points to sensitive locations
+	if isSensitivePath(realPath) {
+		return fmt.Errorf("access to sensitive system path not allowed")
+	}
+
 	return nil
+}
+
+// resolvePathSafely resolves symlinks in a path, handling the case where
+// intermediate directories may be symlinks.
+func resolvePathSafely(path string) (string, error) {
+	// First check if the path exists
+	_, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+
+	// Resolve all symlinks in the path
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+
+	return resolved, nil
+}
+
+// isSensitivePath checks if a path points to a sensitive system location.
+func isSensitivePath(path string) bool {
+	cleanPath := filepath.Clean(path)
+	for _, prefix := range sensitivePathPrefixes {
+		if cleanPath == prefix || strings.HasPrefix(cleanPath, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) handleDisconnect(req *protocol.Request) *protocol.Response {

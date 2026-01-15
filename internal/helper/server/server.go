@@ -22,6 +22,15 @@ const (
 	DefaultSocketPath = "/run/openfortivpn-gui/helper.sock"
 	// DefaultSocketGroup is the group that can access the socket.
 	DefaultSocketGroup = "openfortivpn-gui"
+
+	// maxMessageSize is the maximum allowed size for a single message (64KB).
+	// This prevents DoS attacks via unbounded memory allocation.
+	maxMessageSize = 64 * 1024
+	// initialBufferSize is the initial buffer size for reading messages (4KB).
+	initialBufferSize = 4 * 1024
+	// maxConcurrentClients is the maximum number of simultaneous client connections.
+	// This prevents resource exhaustion attacks.
+	maxConcurrentClients = 10
 )
 
 // RequestHandler is called for each incoming request.
@@ -35,10 +44,11 @@ type Server struct {
 	listener    net.Listener
 	handler     RequestHandler
 
-	mu       sync.RWMutex
-	clients  map[*Client]struct{}
-	running  bool
-	starting bool // Guards against TOCTOU race during Start()
+	mu            sync.RWMutex
+	clients       map[*Client]struct{}
+	running       bool
+	starting      bool              // Guards against TOCTOU race during Start()
+	connSemaphore chan struct{}     // Limits concurrent connections
 }
 
 // NewServer creates a new server instance with the default socket group.
@@ -53,10 +63,11 @@ func NewServerWithGroup(socketPath, socketGroup string, handler RequestHandler) 
 		panic("server: NewServerWithGroup called with nil handler")
 	}
 	return &Server{
-		socketPath:  socketPath,
-		socketGroup: socketGroup,
-		handler:     handler,
-		clients:     make(map[*Client]struct{}),
+		socketPath:    socketPath,
+		socketGroup:   socketGroup,
+		handler:       handler,
+		clients:       make(map[*Client]struct{}),
+		connSemaphore: make(chan struct{}, maxConcurrentClients),
 	}
 }
 
@@ -231,9 +242,20 @@ func (s *Server) acceptLoop() {
 			continue
 		}
 
-		client := newClient(conn)
-		s.addClient(client)
-		go s.handleClient(client)
+		// Try to acquire connection semaphore (non-blocking check first)
+		select {
+		case s.connSemaphore <- struct{}{}:
+			// Acquired semaphore, proceed with client
+			client := newClient(conn)
+			s.addClient(client)
+			go s.handleClient(client)
+		default:
+			// Server at capacity, reject connection
+			slog.Warn("Connection rejected: server at maximum capacity", "max", maxConcurrentClients)
+			if err := conn.Close(); err != nil {
+				slog.Debug("Failed to close rejected connection", "error", err)
+			}
+		}
 	}
 }
 
@@ -253,22 +275,21 @@ func (s *Server) removeClient(client *Client) {
 
 func (s *Server) handleClient(client *Client) {
 	defer func() {
+		// Release connection semaphore
+		<-s.connSemaphore
+
 		if err := client.Close(); err != nil {
 			slog.Debug("Failed to close client connection", "error", err)
 		}
 		s.removeClient(client)
 	}()
 
-	reader := bufio.NewReader(client.conn)
+	// Use Scanner with size limit to prevent DoS via unbounded memory allocation
+	scanner := bufio.NewScanner(client.conn)
+	scanner.Buffer(make([]byte, initialBufferSize), maxMessageSize)
 
-	for {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
-				slog.Error("Read error", "error", err)
-			}
-			return
-		}
+	for scanner.Scan() {
+		line := scanner.Bytes()
 
 		var req protocol.Request
 		if err := json.Unmarshal(line, &req); err != nil {
@@ -285,6 +306,21 @@ func (s *Server) handleClient(client *Client) {
 		if err := client.SendResponse(resp); err != nil {
 			slog.Error("Failed to send response", "error", err)
 			return
+		}
+	}
+
+	// Check for scanner errors (including message too large)
+	if err := scanner.Err(); err != nil {
+		if !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) {
+			if errors.Is(err, bufio.ErrTooLong) {
+				slog.Warn("Client sent message exceeding size limit", "maxSize", maxMessageSize)
+				resp := protocol.NewErrorResponse("", protocol.ErrCodeInvalidRequest, "message too large")
+				if sendErr := client.SendResponse(resp); sendErr != nil {
+					slog.Debug("Failed to send error response", "error", sendErr)
+				}
+			} else {
+				slog.Error("Read error", "error", err)
+			}
 		}
 	}
 }
