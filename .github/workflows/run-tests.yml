@@ -24,11 +24,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  GOMODCACHE: /home/runner/go/pkg/mod
+  GOCACHE: /home/runner/.cache/go-build
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     permissions:
       contents: read
 
@@ -41,6 +45,20 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+
+      # Cache Go modules, build cache, and golangci-lint cache
+      # CGO compilation (GTK bindings) is expensive - this is the main optimization
+      - name: Cache Go artifacts
+        id: go-cache
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: |
+            /home/runner/go/pkg/mod
+            /home/runner/.cache/go-build
+            /home/runner/.cache/golangci-lint
+          key: go-lint-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-lint-${{ runner.os }}-
 
       - name: Run golangci-lint
         run: nix develop --command golangci-lint run
@@ -51,7 +69,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     permissions:
       contents: read
 
@@ -64,6 +82,19 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+
+      # Cache Go modules and build cache
+      # CGO compilation (GTK bindings) is expensive - this is the main optimization
+      - name: Cache Go artifacts
+        id: go-cache
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: |
+            /home/runner/go/pkg/mod
+            /home/runner/.cache/go-build
+          key: go-test-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-test-${{ runner.os }}-
 
       - name: Run tests with coverage
         run: nix develop --command go test -race -coverprofile=coverage.out -covermode=atomic ./...
