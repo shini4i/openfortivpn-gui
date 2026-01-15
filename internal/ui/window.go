@@ -21,6 +21,11 @@ import (
 const (
 	windowDefaultWidth  = 900
 	windowDefaultHeight = 600
+
+	// focusClearDelayMs is the delay in milliseconds before clearing focus/selection
+	// after window presentation. GTK's internal focus handling needs time to complete;
+	// 50ms was empirically determined to be sufficient.
+	focusClearDelayMs = 50
 )
 
 // reconnectState tracks auto-reconnection state for the current session.
@@ -362,12 +367,17 @@ func (w *MainWindow) loadProfiles() {
 	profileIDToSelect := w.getDefaultProfileID(result.Profiles)
 	w.profileList.SelectProfile(profileIDToSelect)
 
-	// Clear focus to prevent profile editor's name entry from being auto-selected.
-	// When a profile is selected, GTK's adw.EntryRow automatically receives focus and
-	// enters edit mode with text selected. Using IdleAdd ensures this runs after the
-	// selection callback completes, clearing the unwanted focus behavior.
-	glib.IdleAdd(func() {
+	// Clear focus and text selection to prevent entry field highlighting.
+	// GTK's adw.EntryRow automatically receives focus and selects text.
+	// A short delay ensures GTK's internal focus handling completes first.
+	glib.TimeoutAdd(focusClearDelayMs, func() {
+		if !w.window.IsVisible() {
+			return
+		}
 		w.window.SetFocus(nil)
+		if w.profileEditor != nil {
+			w.profileEditor.ClearSelection()
+		}
 	})
 }
 
@@ -664,6 +674,17 @@ func (w *MainWindow) showError(title, message string) {
 // Present shows the main window.
 func (w *MainWindow) Present() {
 	w.window.Present()
+	// Clear focus and text selection after window is shown to prevent entry field highlighting.
+	// A short delay ensures GTK's internal focus handling completes first.
+	glib.TimeoutAdd(focusClearDelayMs, func() {
+		if !w.window.IsVisible() {
+			return
+		}
+		w.window.SetFocus(nil)
+		if w.profileEditor != nil {
+			w.profileEditor.ClearSelection()
+		}
+	})
 }
 
 // Window returns the underlying GTK window.
