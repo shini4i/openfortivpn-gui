@@ -58,12 +58,12 @@ func (sd *StatusDisplay) setupWidget() {
 
 	// Profile label
 	sd.profileLabel = gtk.NewLabel("No profile")
-	sd.profileLabel.AddCSSClass("dim-label")
+	sd.profileLabel.SetOpacity(dimmedOpacity) // Subtle dimming without being invisible in dark themes
 	sd.widget.Append(sd.profileLabel)
 
 	// IP label (hidden by default)
 	sd.ipLabel = gtk.NewLabel("")
-	sd.ipLabel.AddCSSClass("dim-label")
+	sd.ipLabel.SetOpacity(dimmedOpacity) // Subtle dimming without being invisible in dark themes
 	sd.ipLabel.SetVisible(false)
 	sd.widget.Append(sd.ipLabel)
 

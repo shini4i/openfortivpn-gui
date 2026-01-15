@@ -276,6 +276,7 @@ func (pe *ProfileEditor) SetProfile(p *profile.Profile) {
 	pe.setRoutesRow.SetActive(p.SetRoutes)
 
 	pe.updateAuthMethodVisibility()
+
 }
 
 // GetProfile returns the current profile with editor values.
@@ -368,6 +369,19 @@ func (pe *ProfileEditor) MarkNewProfile() {
 // Widget returns the root GTK widget for the profile editor.
 func (pe *ProfileEditor) Widget() gtk.Widgetter {
 	return pe.widget
+}
+
+
+// ClearSelection clears text selection in all entry rows to prevent visual highlighting.
+func (pe *ProfileEditor) ClearSelection() {
+	pe.nameRow.SelectRegion(0, 0)
+	pe.descriptionRow.SelectRegion(0, 0)
+	pe.hostRow.SelectRegion(0, 0)
+	pe.realmRow.SelectRegion(0, 0)
+	pe.usernameRow.SelectRegion(0, 0)
+	pe.clientCertRow.SelectRegion(0, 0)
+	pe.clientKeyRow.SelectRegion(0, 0)
+	pe.trustedCertRow.SelectRegion(0, 0)
 }
 
 // Validate checks if the current profile values are valid.

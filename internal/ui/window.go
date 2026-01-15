@@ -21,6 +21,11 @@ import (
 const (
 	windowDefaultWidth  = 900
 	windowDefaultHeight = 600
+
+	// focusClearDelayMs is the delay in milliseconds before clearing focus/selection
+	// after window presentation. GTK's internal focus handling needs time to complete;
+	// 50ms was empirically determined to be sufficient.
+	focusClearDelayMs = 50
 )
 
 // reconnectState tracks auto-reconnection state for the current session.
@@ -361,6 +366,8 @@ func (w *MainWindow) loadProfiles() {
 	// Try to select the last used profile (DefaultProfileID from config)
 	profileIDToSelect := w.getDefaultProfileID(result.Profiles)
 	w.profileList.SelectProfile(profileIDToSelect)
+
+	w.clearFocusAndSelection()
 }
 
 // getDefaultProfileID returns the profile ID to select on startup.
@@ -441,6 +448,11 @@ func (w *MainWindow) performDeleteProfile(p *profile.Profile) {
 	if w.selectedProfile != nil && w.selectedProfile.ID == p.ID {
 		w.selectedProfile = nil
 		w.profileEditor.SetProfile(nil)
+		// Clear profile name from status display and tray
+		w.statusDisplay.SetProfileInfo("")
+		if w.deps.Tray != nil {
+			w.deps.Tray.SetProfileName("")
+		}
 	}
 
 	// Refresh the list
@@ -651,6 +663,24 @@ func (w *MainWindow) showError(title, message string) {
 // Present shows the main window.
 func (w *MainWindow) Present() {
 	w.window.Present()
+	w.clearFocusAndSelection()
+}
+
+// clearFocusAndSelection clears focus and text selection after a short delay
+// to prevent entry field highlighting. GTK's adw.EntryRow automatically receives
+// focus and selects text when the window is presented. A delay ensures GTK's
+// internal focus handling completes first.
+func (w *MainWindow) clearFocusAndSelection() {
+	glib.TimeoutAdd(focusClearDelayMs, func() bool {
+		if !w.window.IsVisible() {
+			return false
+		}
+		w.window.SetFocus(nil)
+		if w.profileEditor != nil {
+			w.profileEditor.ClearSelection()
+		}
+		return false
+	})
 }
 
 // Window returns the underlying GTK window.

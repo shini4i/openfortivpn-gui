@@ -7,6 +7,10 @@ import (
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
 )
 
+// dimmedOpacity is used for subtle dimming of secondary UI elements.
+// Using SetOpacity instead of dim-label CSS class to ensure visibility in dark themes.
+const dimmedOpacity = 0.7
+
 // ProfileList displays a list of VPN profiles in the sidebar.
 type ProfileList struct {
 	widget *gtk.Box
@@ -82,16 +86,15 @@ func (pl *ProfileList) createEmptyPlaceholder() gtk.Widgetter {
 
 	icon := gtk.NewImageFromIconName("network-vpn-symbolic")
 	icon.SetPixelSize(64)
-	icon.AddCSSClass("dim-label")
+	icon.SetOpacity(dimmedOpacity) // Subtle dimming without being invisible in dark themes
 	box.Append(icon)
 
 	label := gtk.NewLabel("No Profiles")
 	label.AddCSSClass("title-2")
-	label.AddCSSClass("dim-label")
 	box.Append(label)
 
 	sublabel := gtk.NewLabel("Click + to add a VPN profile")
-	sublabel.AddCSSClass("dim-label")
+	sublabel.SetOpacity(dimmedOpacity) // Subtle dimming without being invisible in dark themes
 	box.Append(sublabel)
 
 	return box
@@ -157,7 +160,7 @@ func (pl *ProfileList) addProfileRow(p *profile.Profile) {
 	}
 	subtitleLabel := gtk.NewLabel(subtitle)
 	subtitleLabel.AddCSSClass("caption")
-	subtitleLabel.SetOpacity(0.7) // Subtle dimming without being invisible
+	subtitleLabel.SetOpacity(dimmedOpacity) // Subtle dimming without being invisible
 	subtitleLabel.SetXAlign(0)
 	subtitleLabel.SetEllipsize(pango.EllipsizeEnd)
 	textBox.Append(subtitleLabel)

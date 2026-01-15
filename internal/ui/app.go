@@ -289,6 +289,7 @@ func (a *App) ShowAboutDialog() {
 	about.SetIssueURL("https://github.com/shini4i/openfortivpn-gui/issues")
 	about.SetLicenseType(gtk.LicenseGPL30)
 	about.SetComments("A GTK4 GUI client for Fortinet SSL VPN")
+	about.AddLink("View License", "https://github.com/shini4i/openfortivpn-gui/blob/main/LICENSE")
 
 	about.Present(a.window.window)
 }
