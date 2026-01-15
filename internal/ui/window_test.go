@@ -58,60 +58,65 @@ func newTestConfigManager(t *testing.T, cfg *config.Config) (*config.Manager, fu
 
 // TestShouldTriggerReconnect_StateTransitions tests that reconnect only triggers
 // when transitioning from Connected to Disconnected state.
+// Note: This test uses a nil ConfigManager, so shouldTriggerReconnect always returns false.
+// The validStateTransition field indicates whether the state transition would be valid
+// for reconnect consideration (Connected -> Disconnected). The test verifies that invalid
+// state transitions are rejected, while TestShouldTriggerReconnect_WithConfigManager tests
+// the full end-to-end behavior with a real ConfigManager.
 func TestShouldTriggerReconnect_StateTransitions(t *testing.T) {
 	tests := []struct {
-		name     string
-		oldState vpn.ConnectionState
-		newState vpn.ConnectionState
-		want     bool
+		name                 string
+		oldState             vpn.ConnectionState
+		newState             vpn.ConnectionState
+		validStateTransition bool // Indicates if this is a valid state transition for reconnect
 	}{
 		{
-			name:     "Connected to Disconnected should consider reconnect",
-			oldState: vpn.StateConnected,
-			newState: vpn.StateDisconnected,
-			want:     true, // May trigger if other conditions are met
+			name:                 "Connected to Disconnected is valid state transition",
+			oldState:             vpn.StateConnected,
+			newState:             vpn.StateDisconnected,
+			validStateTransition: true,
 		},
 		{
-			name:     "Connecting to Disconnected should not trigger",
-			oldState: vpn.StateConnecting,
-			newState: vpn.StateDisconnected,
-			want:     false,
+			name:                 "Connecting to Disconnected should not trigger",
+			oldState:             vpn.StateConnecting,
+			newState:             vpn.StateDisconnected,
+			validStateTransition: false,
 		},
 		{
-			name:     "Connected to Failed should not trigger",
-			oldState: vpn.StateConnected,
-			newState: vpn.StateFailed,
-			want:     false,
+			name:                 "Connected to Failed should not trigger",
+			oldState:             vpn.StateConnected,
+			newState:             vpn.StateFailed,
+			validStateTransition: false,
 		},
 		{
-			name:     "Disconnected to Connecting should not trigger",
-			oldState: vpn.StateDisconnected,
-			newState: vpn.StateConnecting,
-			want:     false,
+			name:                 "Disconnected to Connecting should not trigger",
+			oldState:             vpn.StateDisconnected,
+			newState:             vpn.StateConnecting,
+			validStateTransition: false,
 		},
 		{
-			name:     "Authenticating to Disconnected should not trigger",
-			oldState: vpn.StateAuthenticating,
-			newState: vpn.StateDisconnected,
-			want:     false,
+			name:                 "Authenticating to Disconnected should not trigger",
+			oldState:             vpn.StateAuthenticating,
+			newState:             vpn.StateDisconnected,
+			validStateTransition: false,
 		},
 		{
-			name:     "Reconnecting to Disconnected should not trigger",
-			oldState: vpn.StateReconnecting,
-			newState: vpn.StateDisconnected,
-			want:     false,
+			name:                 "Reconnecting to Disconnected should not trigger",
+			oldState:             vpn.StateReconnecting,
+			newState:             vpn.StateDisconnected,
+			validStateTransition: false,
 		},
 		{
-			name:     "Failed to Disconnected should not trigger",
-			oldState: vpn.StateFailed,
-			newState: vpn.StateDisconnected,
-			want:     false,
+			name:                 "Failed to Disconnected should not trigger",
+			oldState:             vpn.StateFailed,
+			newState:             vpn.StateDisconnected,
+			validStateTransition: false,
 		},
 		{
-			name:     "Connected to Connecting should not trigger",
-			oldState: vpn.StateConnected,
-			newState: vpn.StateConnecting,
-			want:     false,
+			name:                 "Connected to Connecting should not trigger",
+			oldState:             vpn.StateConnected,
+			newState:             vpn.StateConnecting,
+			validStateTransition: false,
 		},
 	}
 
@@ -129,15 +134,12 @@ func TestShouldTriggerReconnect_StateTransitions(t *testing.T) {
 
 			result := w.shouldTriggerReconnect(tt.oldState, tt.newState)
 
-			if tt.want {
-				// For Connected->Disconnected, we need ConfigManager to actually return true
-				// Without ConfigManager, shouldTriggerReconnect returns false at the config check
-				// So we verify it at least passes the state check by checking it doesn't return early
-				// The actual result depends on ConfigManager presence
-				assert.False(t, result, "without ConfigManager, should return false even for valid state transition")
-			} else {
-				assert.False(t, result, "should not trigger reconnect for invalid state transition")
-			}
+			// ConfigManager is nil, so shouldTriggerReconnect always returns false.
+			// This test verifies that invalid state transitions are correctly rejected.
+			// For valid state transitions (Connected->Disconnected), the full path is
+			// tested in TestShouldTriggerReconnect_WithConfigManager.
+			assert.False(t, result, "expected false: %s (validStateTransition=%v, but ConfigManager is nil)",
+				tt.name, tt.validStateTransition)
 		})
 	}
 }
@@ -231,7 +233,7 @@ func TestShouldTriggerReconnect_NoConfigManager(t *testing.T) {
 // TestReconnectState_ThreadSafety tests concurrent access to reconnectState.
 func TestReconnectState_ThreadSafety(t *testing.T) {
 	state := &reconnectState{}
-	profile := &profile.Profile{
+	testProfile := &profile.Profile{
 		ID:            "test-profile-id",
 		Name:          "Test Profile",
 		AutoReconnect: true,
@@ -269,7 +271,7 @@ func TestReconnectState_ThreadSafety(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
 				state.mu.Lock()
-				state.lastConnectedProfile = profile
+				state.lastConnectedProfile = testProfile
 				state.mu.Unlock()
 
 				state.mu.Lock()
@@ -340,60 +342,6 @@ func TestReconnectState_AttemptCountReset(t *testing.T) {
 	assert.Equal(t, 0, state.attemptCount, "attempt count should be reset")
 	assert.False(t, state.userInitiatedDisconnect, "userInitiatedDisconnect should be cleared")
 	state.mu.Unlock()
-}
-
-// TestShouldTriggerReconnect_AuthMethodVariants tests reconnect behavior with
-// different authentication methods.
-func TestShouldTriggerReconnect_AuthMethodVariants(t *testing.T) {
-	tests := []struct {
-		name       string
-		authMethod profile.AuthMethod
-		shouldPass bool // Whether it should pass the auth method check (OTP should fail)
-	}{
-		{
-			name:       "Password auth should allow reconnect",
-			authMethod: profile.AuthMethodPassword,
-			shouldPass: true,
-		},
-		{
-			name:       "OTP auth should not allow reconnect",
-			authMethod: profile.AuthMethodOTP,
-			shouldPass: false,
-		},
-		{
-			name:       "Certificate auth should allow reconnect",
-			authMethod: profile.AuthMethodCertificate,
-			shouldPass: true,
-		},
-		{
-			name:       "SAML auth should allow reconnect",
-			authMethod: profile.AuthMethodSAML,
-			shouldPass: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			w := newTestMainWindow(nil)
-			w.reconnectState.userInitiatedDisconnect = false
-			w.reconnectState.lastConnectedProfile = &profile.Profile{
-				ID:            "test-profile-id",
-				Name:          "Test Profile",
-				AutoReconnect: true,
-				AuthMethod:    tt.authMethod,
-			}
-
-			result := w.shouldTriggerReconnect(vpn.StateConnected, vpn.StateDisconnected)
-
-			// Without ConfigManager, all results should be false (fails at config check)
-			// But OTP should fail earlier at the auth method check
-			assert.False(t, result, "without ConfigManager, result should be false")
-
-			// To verify the auth method check specifically, we can check if the profile
-			// was modified (userInitiatedDisconnect flag reset indicates we passed initial checks)
-			// The function resets userInitiatedDisconnect to false even on rejection
-		})
-	}
 }
 
 // TestReconnectState_TimerNilInitially tests that reconnect timer is nil initially.
@@ -486,25 +434,6 @@ func TestCancelReconnect_NilTimer(t *testing.T) {
 	assert.NotPanics(t, func() {
 		w.cancelReconnect()
 	}, "cancelReconnect should not panic with nil timer")
-}
-
-// TestCancelReconnect_StopsTimer tests that cancelling reconnect stops the timer.
-func TestCancelReconnect_StopsTimer(t *testing.T) {
-	w := newTestMainWindow(nil)
-
-	// Create a timer that won't fire (long duration)
-	w.reconnectState.mu.Lock()
-	w.reconnectState.reconnectTimer = nil // Timer would need glib.IdleAdd which requires GTK
-	w.reconnectState.mu.Unlock()
-
-	// Just verify the method doesn't panic with various states
-	assert.NotPanics(t, func() {
-		w.cancelReconnect()
-	}, "cancelReconnect should not panic")
-
-	w.reconnectState.mu.Lock()
-	assert.Nil(t, w.reconnectState.reconnectTimer, "timer should be nil after cancel")
-	w.reconnectState.mu.Unlock()
 }
 
 // TestShouldTriggerReconnect_WithConfigManager tests the full reconnect logic

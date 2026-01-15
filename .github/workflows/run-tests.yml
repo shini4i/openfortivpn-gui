@@ -28,7 +28,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
     permissions:
       contents: read
 
@@ -41,6 +41,14 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+
+      # Cache Nix store in GitHub Actions cache to speed up subsequent runs.
+      # First run after cache expiry (7 days) or flake.lock changes will be slower.
+      - name: Setup Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
+        with:
+          use-flakehub: false
+          diagnostic-endpoint: ""
 
       - name: Run golangci-lint
         run: nix develop --command golangci-lint run
@@ -51,7 +59,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
     permissions:
       contents: read
 
@@ -64,6 +72,14 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+
+      # Cache Nix store in GitHub Actions cache to speed up subsequent runs.
+      # First run after cache expiry (7 days) or flake.lock changes will be slower.
+      - name: Setup Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
+        with:
+          use-flakehub: false
+          diagnostic-endpoint: ""
 
       - name: Run tests with coverage
         run: nix develop --command go test -race -coverprofile=coverage.out -covermode=atomic ./...
