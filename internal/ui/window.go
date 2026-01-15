@@ -367,18 +367,7 @@ func (w *MainWindow) loadProfiles() {
 	profileIDToSelect := w.getDefaultProfileID(result.Profiles)
 	w.profileList.SelectProfile(profileIDToSelect)
 
-	// Clear focus and text selection to prevent entry field highlighting.
-	// GTK's adw.EntryRow automatically receives focus and selects text.
-	// A short delay ensures GTK's internal focus handling completes first.
-	glib.TimeoutAdd(focusClearDelayMs, func() {
-		if !w.window.IsVisible() {
-			return
-		}
-		w.window.SetFocus(nil)
-		if w.profileEditor != nil {
-			w.profileEditor.ClearSelection()
-		}
-	})
+	w.clearFocusAndSelection()
 }
 
 // getDefaultProfileID returns the profile ID to select on startup.
@@ -674,16 +663,23 @@ func (w *MainWindow) showError(title, message string) {
 // Present shows the main window.
 func (w *MainWindow) Present() {
 	w.window.Present()
-	// Clear focus and text selection after window is shown to prevent entry field highlighting.
-	// A short delay ensures GTK's internal focus handling completes first.
-	glib.TimeoutAdd(focusClearDelayMs, func() {
+	w.clearFocusAndSelection()
+}
+
+// clearFocusAndSelection clears focus and text selection after a short delay
+// to prevent entry field highlighting. GTK's adw.EntryRow automatically receives
+// focus and selects text when the window is presented. A delay ensures GTK's
+// internal focus handling completes first.
+func (w *MainWindow) clearFocusAndSelection() {
+	glib.TimeoutAdd(focusClearDelayMs, func() bool {
 		if !w.window.IsVisible() {
-			return
+			return false
 		}
 		w.window.SetFocus(nil)
 		if w.profileEditor != nil {
 			w.profileEditor.ClearSelection()
 		}
+		return false
 	})
 }
 
