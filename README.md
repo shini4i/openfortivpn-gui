@@ -1,12 +1,20 @@
-# openfortivpn-gui
+<h1 align="center">openfortivpn-gui</h1>
 
-![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/shini4i/openfortivpn-gui)
-![GitHub release (latest by date)](https://img.shields.io/github/v/release/shini4i/openfortivpn-gui)
-[![codecov](https://codecov.io/gh/shini4i/openfortivpn-gui/graph/badge.svg?token=PSGP25XQ4K)](https://codecov.io/gh/shini4i/openfortivpn-gui)
-[![Go Report Card](https://goreportcard.com/badge/github.com/shini4i/openfortivpn-gui)](https://goreportcard.com/report/github.com/shini4i/openfortivpn-gui)
-![GitHub](https://img.shields.io/github/license/shini4i/openfortivpn-gui)
+<p align="center">
+  <img src="https://img.shields.io/github/go-mod/go-version/shini4i/openfortivpn-gui" alt="GitHub go.mod Go version">
+  <img src="https://img.shields.io/github/v/release/shini4i/openfortivpn-gui" alt="GitHub release">
+  <a href="https://codecov.io/gh/shini4i/openfortivpn-gui"><img src="https://codecov.io/gh/shini4i/openfortivpn-gui/graph/badge.svg?token=PSGP25XQ4K" alt="codecov"></a>
+  <a href="https://goreportcard.com/report/github.com/shini4i/openfortivpn-gui"><img src="https://goreportcard.com/badge/github.com/shini4i/openfortivpn-gui" alt="Go Report Card"></a>
+  <img src="https://img.shields.io/github/license/shini4i/openfortivpn-gui" alt="GitHub license">
+</p>
 
-A modern GTK4/libadwaita GUI client for Fortinet SSL VPN on Linux, wrapping the [openfortivpn](https://github.com/adrienverge/openfortivpn) CLI tool.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/shini4i/assets/main/src/openfortivpn-gui/screenshot.png" alt="openfortivpn-gui screenshot" width="800">
+</p>
+
+<p align="center">
+  A modern GTK4/libadwaita GUI client for Fortinet SSL VPN on Linux, wrapping the <a href="https://github.com/adrienverge/openfortivpn">openfortivpn</a> CLI tool.
+</p>
 
 ## Features
 
