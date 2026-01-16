@@ -4,7 +4,9 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -183,8 +185,19 @@ func TestServerMaxConcurrentClients(t *testing.T) {
 		_ = extraConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		buf := make([]byte, 1)
 		_, readErr := extraConn.Read(buf)
-		// Expect EOF or closed connection error
-		assert.Error(t, readErr, "Expected extra connection to be closed")
+
+		// Distinguish timeout errors from actual closed connection errors
+		var netErr net.Error
+		if errors.As(readErr, &netErr) && netErr.Timeout() {
+			_ = extraConn.Close()
+			t.Fatalf("Expected connection to be closed by server, but got timeout instead")
+		}
+
+		// Expect EOF or explicit closed connection error
+		isEOF := errors.Is(readErr, io.EOF)
+		isClosedConn := readErr != nil && strings.Contains(readErr.Error(), "use of closed network connection")
+		assert.True(t, isEOF || isClosedConn,
+			"Expected EOF or closed connection error, got: %v", readErr)
 		_ = extraConn.Close()
 	}
 
