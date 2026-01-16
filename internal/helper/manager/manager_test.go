@@ -237,6 +237,16 @@ func TestIsSensitivePath(t *testing.T) {
 			sensitive: true,
 		},
 		{
+			name:      "/etc/pam.d/ directory is sensitive",
+			path:      "/etc/pam.d/common-auth",
+			sensitive: true,
+		},
+		{
+			name:      "/etc/krb5.keytab is sensitive",
+			path:      "/etc/krb5.keytab",
+			sensitive: true,
+		},
+		{
 			name:      "/root/ directory is sensitive",
 			path:      "/root/.bashrc",
 			sensitive: true,
@@ -264,6 +274,11 @@ func TestIsSensitivePath(t *testing.T) {
 		{
 			name:      "/var/lib/secrets/ is sensitive",
 			path:      "/var/lib/secrets/myapp.key",
+			sensitive: true,
+		},
+		{
+			name:      "/var/log/ is sensitive",
+			path:      "/var/log/auth.log",
 			sensitive: true,
 		},
 		{
@@ -313,6 +328,23 @@ func TestResolvePathSafely(t *testing.T) {
 
 	t.Run("resolves symlink to target", func(t *testing.T) {
 		resolved, err := resolvePathSafely(symlinkFile)
+		require.NoError(t, err)
+		assert.Equal(t, regularFile, resolved)
+	})
+
+	t.Run("resolves chained symlinks", func(t *testing.T) {
+		// Create an intermediate symlink pointing to regularFile
+		intermediateLink := filepath.Join(tempDir, "intermediate.txt")
+		err := os.Symlink(regularFile, intermediateLink)
+		require.NoError(t, err)
+
+		// Create a chained symlink pointing to the intermediate symlink
+		chainedLink := filepath.Join(tempDir, "chained.txt")
+		err = os.Symlink(intermediateLink, chainedLink)
+		require.NoError(t, err)
+
+		// Verify that resolvePathSafely follows the entire chain
+		resolved, err := resolvePathSafely(chainedLink)
 		require.NoError(t, err)
 		assert.Equal(t, regularFile, resolved)
 	})

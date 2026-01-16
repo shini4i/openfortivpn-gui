@@ -3,7 +3,6 @@
 <p align="center">
   <img src="https://img.shields.io/github/go-mod/go-version/shini4i/openfortivpn-gui" alt="GitHub go.mod Go version">
   <img src="https://img.shields.io/github/v/release/shini4i/openfortivpn-gui" alt="GitHub release">
-  <a href="https://codecov.io/gh/shini4i/openfortivpn-gui"><img src="https://codecov.io/gh/shini4i/openfortivpn-gui/graph/badge.svg?token=PSGP25XQ4K" alt="codecov"></a>
   <a href="https://goreportcard.com/report/github.com/shini4i/openfortivpn-gui"><img src="https://goreportcard.com/badge/github.com/shini4i/openfortivpn-gui" alt="Go Report Card"></a>
   <img src="https://img.shields.io/github/license/shini4i/openfortivpn-gui" alt="GitHub license">
 </p>

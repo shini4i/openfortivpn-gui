@@ -4,6 +4,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,8 +20,25 @@ import (
 
 // testHandler is a simple handler for testing.
 func testHandler(req *protocol.Request) *protocol.Response {
-	resp, _ := protocol.NewSuccessResponse(req.ID, map[string]string{"status": "ok"})
+	resp, err := protocol.NewSuccessResponse(req.ID, map[string]string{"status": "ok"})
+	if err != nil {
+		panic(fmt.Sprintf("testHandler: NewSuccessResponse failed: %v", err))
+	}
 	return resp
+}
+
+// waitForClientCount polls the server's ClientCount until it matches the expected value
+// or the timeout elapses. It fails the test if the timeout is reached.
+func waitForClientCount(t *testing.T, server *Server, expected int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if server.ClientCount() == expected {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("waitForClientCount: expected %d clients, got %d after %v", expected, server.ClientCount(), timeout)
 }
 
 // TestServerStartStop tests basic server lifecycle.
@@ -154,9 +172,8 @@ func TestServerMaxConcurrentClients(t *testing.T) {
 		conns = append(conns, conn)
 	}
 
-	// Wait for all connections to be registered
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, maxConcurrentClients, server.ClientCount())
+	// Wait for all connections to be registered using polling
+	waitForClientCount(t, server, maxConcurrentClients, 1*time.Second)
 
 	// Try to create one more connection - should be rejected
 	extraConn, err := net.Dial("unix", socketPath)
@@ -176,9 +193,8 @@ func TestServerMaxConcurrentClients(t *testing.T) {
 		_ = conn.Close()
 	}
 
-	// Wait for cleanup
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, 0, server.ClientCount())
+	// Wait for cleanup using polling
+	waitForClientCount(t, server, 0, 1*time.Second)
 }
 
 // TestServerBroadcast tests that events are broadcast to all clients.

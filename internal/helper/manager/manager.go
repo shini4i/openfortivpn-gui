@@ -28,12 +28,15 @@ var sensitivePathPrefixes = []string{
 	"/etc/group",
 	"/etc/ssh/",
 	"/etc/security/",
+	"/etc/pam.d/",
+	"/etc/krb5.keytab",
 	"/root/",
 	"/proc/",
 	"/sys/",
 	"/dev/",
 	"/boot/",
 	"/var/lib/secrets/",
+	"/var/log/",
 }
 
 // EventBroadcaster is called to broadcast events to all clients.
