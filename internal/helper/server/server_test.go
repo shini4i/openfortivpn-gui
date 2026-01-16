@@ -105,17 +105,30 @@ func TestServerMaxMessageSize(t *testing.T) {
 	// Set a read timeout to avoid hanging
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
 	reader := bufio.NewReader(conn)
-	response, err := reader.ReadBytes('\n')
+	response, readErr := reader.ReadBytes('\n')
 
-	if err == nil {
+	if readErr == nil {
 		// Server sent an error response
 		var errResp protocol.Response
-		err := json.Unmarshal(response, &errResp)
-		require.NoError(t, err)
+		unmarshalErr := json.Unmarshal(response, &errResp)
+		require.NoError(t, unmarshalErr)
 		assert.NotNil(t, errResp.Error)
 		assert.Contains(t, errResp.Error.Message, "message too large")
+	} else {
+		// Server closed connection - verify it's an expected terminal condition
+		// and not a timeout or unexpected error
+		var netErr net.Error
+		if errors.As(readErr, &netErr) && netErr.Timeout() {
+			t.Fatalf("Expected server to close connection or send error, but got timeout: %v", readErr)
+		}
+
+		// Accept EOF or connection-closed errors as valid responses
+		isEOF := errors.Is(readErr, io.EOF)
+		isClosedConn := strings.Contains(readErr.Error(), "use of closed network connection")
+		if !isEOF && !isClosedConn {
+			t.Fatalf("Unexpected error reading response: %v", readErr)
+		}
 	}
-	// If err != nil, server closed connection which is also acceptable
 }
 
 // TestServerValidRequest tests that valid requests are processed correctly.
@@ -272,8 +285,9 @@ func TestServerBroadcast(t *testing.T) {
 
 // TestNewServerWithGroupNilHandler tests that nil handler causes panic.
 func TestNewServerWithGroupNilHandler(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	assert.Panics(t, func() {
-		NewServerWithGroup("/tmp/test.sock", "", nil)
+		NewServerWithGroup(socketPath, "", nil)
 	})
 }
 
