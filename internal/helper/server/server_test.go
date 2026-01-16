@@ -88,9 +88,8 @@ func TestServerMaxMessageSize(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 
-	// Wait for connection to be established
-	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, 1, server.ClientCount())
+	// Wait for connection to be established using polling
+	waitForClientCount(t, server, 1, 1*time.Second)
 
 	// Send a message that exceeds the limit (64KB + some extra)
 	// We need to send without a newline to trigger the buffer overflow
@@ -133,6 +132,7 @@ func TestServerValidRequest(t *testing.T) {
 
 	// Send a valid request
 	req := protocol.Request{
+		Type:    protocol.MessageTypeRequest,
 		ID:      "test-1",
 		Command: "status",
 	}
@@ -223,9 +223,8 @@ func TestServerBroadcast(t *testing.T) {
 		}
 	}()
 
-	// Wait for connections to be established
-	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, numClients, server.ClientCount())
+	// Wait for connections to be established using polling
+	waitForClientCount(t, server, numClients, 1*time.Second)
 
 	// Broadcast an event
 	event, err := protocol.NewEvent(protocol.EventOutput, protocol.OutputData{Line: "test broadcast"})

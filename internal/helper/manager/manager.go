@@ -184,11 +184,18 @@ func validateFilePath(path string) error {
 		return fmt.Errorf("path must be absolute")
 	}
 
-	// Resolve symlinks to get the real path
+	// Resolve symlinks to get the real path.
+	// NOTE: There is an acknowledged TOCTOU (time-of-check-time-of-use) window between
+	// this validation and when openfortivpn actually opens the file. An attacker could
+	// theoretically create a symlink to a sensitive location after this check passes
+	// but before openfortivpn uses the file. This risk is accepted by the threat model
+	// because: (1) the window is very small, (2) it requires local attacker access,
+	// and (3) openfortivpn runs with limited privileges. We intentionally allow
+	// os.IsNotExist errors to pass through so openfortivpn handles missing files.
 	realPath, err := resolvePathSafely(path)
 	if err != nil {
-		// If the file doesn't exist, we can't resolve symlinks
-		// Allow it through - openfortivpn will handle the error appropriately
+		// If the file doesn't exist, we can't resolve symlinks.
+		// Allow it through - openfortivpn will handle the error appropriately.
 		if os.IsNotExist(err) {
 			return nil
 		}
