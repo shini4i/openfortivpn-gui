@@ -3,7 +3,6 @@ package reconnect
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 
@@ -23,7 +22,11 @@ func (m *mockPasswordProvider) Get(profileID string) (string, error) {
 	if m.err != nil {
 		return "", m.err
 	}
-	return m.passwords[profileID], nil
+	pw, ok := m.passwords[profileID]
+	if !ok {
+		return "", errors.New("password not found")
+	}
+	return pw, nil
 }
 
 func TestNewManager(t *testing.T) {
@@ -206,8 +209,7 @@ func TestManager_Cancel(t *testing.T) {
 func TestManager_PerformReconnect_Success(t *testing.T) {
 	var connectedProfile *profile.Profile
 	var connectedPassword string
-	var wg sync.WaitGroup
-	wg.Add(1)
+	done := make(chan struct{})
 
 	m := NewManager(DefaultConfig(), nil)
 	m.lastConnectedProfile = &profile.Profile{
@@ -221,13 +223,18 @@ func TestManager_PerformReconnect_Success(t *testing.T) {
 	m.connectFunc = func(ctx context.Context, p *profile.Profile, password string) error {
 		connectedProfile = p
 		connectedPassword = password
-		wg.Done()
+		close(done)
 		return nil
 	}
 	m.ctx = context.Background()
 
 	m.performReconnect()
-	wg.Wait()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("connect was not called within timeout")
+	}
 
 	require.NotNil(t, connectedProfile)
 	assert.Equal(t, "test-id", connectedProfile.ID)
@@ -236,8 +243,7 @@ func TestManager_PerformReconnect_Success(t *testing.T) {
 
 func TestManager_PerformReconnect_SAML_NoPassword(t *testing.T) {
 	var connectedPassword string
-	var wg sync.WaitGroup
-	wg.Add(1)
+	done := make(chan struct{})
 
 	m := NewManager(DefaultConfig(), nil)
 	m.lastConnectedProfile = &profile.Profile{
@@ -248,13 +254,18 @@ func TestManager_PerformReconnect_SAML_NoPassword(t *testing.T) {
 	// No password provider needed for SAML
 	m.connectFunc = func(ctx context.Context, p *profile.Profile, password string) error {
 		connectedPassword = password
-		wg.Done()
+		close(done)
 		return nil
 	}
 	m.ctx = context.Background()
 
 	m.performReconnect()
-	wg.Wait()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("connect was not called within timeout")
+	}
 
 	assert.Equal(t, "", connectedPassword)
 }

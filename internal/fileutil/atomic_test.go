@@ -61,7 +61,7 @@ func TestAtomicWrite_DirectoryNotExist(t *testing.T) {
 
 	err := AtomicWrite(path, []byte("data"), 0600)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "write temp file")
+	assert.Contains(t, err.Error(), "create temp file")
 }
 
 func TestAtomicWrite_EmptyData(t *testing.T) {

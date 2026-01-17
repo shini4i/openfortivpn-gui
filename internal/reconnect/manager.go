@@ -99,13 +99,25 @@ func (m *Manager) SetCallbacks(cb Callbacks) {
 }
 
 // OnConnectionSucceeded should be called when a connection succeeds.
-// Resets the attempt counter and clears user-initiated flag.
+// Resets the attempt counter, clears user-initiated flag, and cancels any pending timer.
 func (m *Manager) OnConnectionSucceeded() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.attemptCount = 0
 	m.userInitiatedDisconnect = false
+
+	// Cancel any pending reconnect timer
+	if m.reconnectTimer != nil {
+		if !m.reconnectTimer.Stop() {
+			// Timer already fired, drain the channel to avoid stale callback
+			select {
+			case <-m.reconnectTimer.C:
+			default:
+			}
+		}
+		m.reconnectTimer = nil
+	}
 }
 
 // SetUserDisconnect marks the next disconnect as user-initiated.
@@ -199,14 +211,25 @@ func (m *Manager) StartReconnect() {
 
 	delay := time.Duration(m.config.DelaySeconds) * time.Second
 
-	// Schedule reconnect on main thread
+	// Schedule reconnect on main thread.
+	// Capture timer reference to detect if it was cancelled/replaced before callback runs.
+	var thisTimer *time.Timer
 	m.reconnectTimer = time.AfterFunc(delay, func() {
+		// Check if this timer is still the active one
+		m.mu.Lock()
+		if m.reconnectTimer != thisTimer {
+			m.mu.Unlock()
+			return
+		}
+		m.mu.Unlock()
+
 		if m.scheduleOnMain != nil {
 			m.scheduleOnMain(m.performReconnect)
 		} else {
 			m.performReconnect()
 		}
 	})
+	thisTimer = m.reconnectTimer
 	m.mu.Unlock()
 
 	slog.Info("Scheduling reconnect attempt",
@@ -281,6 +304,9 @@ func (m *Manager) performReconnect() {
 		var err error
 		password, err = passwordProvider.Get(p.ID)
 		if err != nil || password == "" {
+			if err == nil {
+				err = errors.New("password is empty")
+			}
 			slog.Error("Cannot reconnect: password not available in keyring",
 				"profile", p.Name, "error", err)
 			if callbacks.OnFailed != nil {
