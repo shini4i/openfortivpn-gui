@@ -89,32 +89,44 @@ func TestErrInterfaceNotFound(t *testing.T) {
 
 func TestDetectInterfaceWithRetry_DefaultValues(t *testing.T) {
 	// Test that default values are used when 0 is passed
-	start := time.Now()
-	_, err := DetectInterfaceWithRetry("192.0.2.1", 0, 0)
-	elapsed := time.Since(start)
+	var sleepCalls int
+	var totalDuration time.Duration
+	mockSleep := func(d time.Duration) {
+		sleepCalls++
+		totalDuration += d
+	}
+
+	_, err := DetectInterfaceWithRetry("192.0.2.1", 0, 0, mockSleep)
 
 	// Should use defaults: 5 retries with 100ms initial backoff
-	// Total wait time: 100 + 200 + 400 + 800 = 1500ms minimum
+	// Sleep is called between retries, so 4 times for 5 retries
+	// Durations: 100 + 200 + 400 + 800 = 1500ms
 	assert.Equal(t, ErrInterfaceNotFound, err)
-	assert.True(t, elapsed >= 1500*time.Millisecond, "should have used default retry count")
+	assert.Equal(t, 4, sleepCalls, "should sleep between retries (not after final)")
+	assert.Equal(t, 1500*time.Millisecond, totalDuration, "should use exponential backoff")
 }
 
 func TestDetectInterfaceWithRetry_SingleRetry(t *testing.T) {
-	start := time.Now()
-	_, err := DetectInterfaceWithRetry("192.0.2.1", 1, 10*time.Millisecond)
-	elapsed := time.Since(start)
+	var sleepCalls int
+	mockSleep := func(d time.Duration) {
+		sleepCalls++
+	}
 
-	// With 1 retry and 10ms backoff, should complete quickly
+	_, err := DetectInterfaceWithRetry("192.0.2.1", 1, 10*time.Millisecond, mockSleep)
+
+	// With 1 retry, no sleep should occur (no retry after final attempt)
 	assert.Equal(t, ErrInterfaceNotFound, err)
-	assert.True(t, elapsed < 100*time.Millisecond, "single retry should be fast")
+	assert.Equal(t, 0, sleepCalls, "single retry should not sleep")
 }
 
 func TestDetectInterfaceWithRetry_InvalidIP(t *testing.T) {
-	_, err := DetectInterfaceWithRetry("not-an-ip", 1, 10*time.Millisecond)
+	noopSleep := func(d time.Duration) {}
+	_, err := DetectInterfaceWithRetry("not-an-ip", 1, 10*time.Millisecond, noopSleep)
 	assert.Equal(t, ErrInterfaceNotFound, err)
 }
 
 func TestDetectInterfaceWithRetry_EmptyIP(t *testing.T) {
-	_, err := DetectInterfaceWithRetry("", 1, 10*time.Millisecond)
+	noopSleep := func(d time.Duration) {}
+	_, err := DetectInterfaceWithRetry("", 1, 10*time.Millisecond, noopSleep)
 	assert.Equal(t, ErrInterfaceNotFound, err)
 }

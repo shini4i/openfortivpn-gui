@@ -143,7 +143,7 @@ func (c *HelperClient) GetInterface() string {
 // It uses DetectInterfaceWithRetry for retry logic, then verifies the connection
 // state is still valid before setting the interface name.
 func (c *HelperClient) detectInterface(assignedIP string) {
-	ifaceName, err := vpn.DetectInterfaceWithRetry(assignedIP, 5, 100*time.Millisecond)
+	ifaceName, err := vpn.DetectInterfaceWithRetry(assignedIP, 5, 100*time.Millisecond, nil)
 	if err != nil {
 		slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP)
 		return

@@ -179,7 +179,7 @@ func (c *Controller) setInterface(name string) {
 // It uses DetectInterfaceWithRetry for retry logic, then verifies the connection
 // state is still valid before setting the interface name.
 func (c *Controller) detectInterface(assignedIP string) {
-	ifaceName, err := DetectInterfaceWithRetry(assignedIP, 5, 100*time.Millisecond)
+	ifaceName, err := DetectInterfaceWithRetry(assignedIP, 5, 100*time.Millisecond, nil)
 	if err != nil {
 		slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP)
 		return
