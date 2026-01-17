@@ -183,16 +183,19 @@ func (c *Controller) detectInterface(assignedIP string) {
 	for i := 0; i < maxRetries; i++ {
 		ifaceName, err := DetectVPNInterface(assignedIP)
 		if err == nil {
-			// Verify state before setting interface to avoid race with newer connections
+			// Verify state before setting interface to avoid race with newer connections.
+			// Capture current values under lock for logging after unlock.
 			c.mu.Lock()
-			if c.assignedIP == assignedIP && c.state != StateDisconnected {
+			currentIP := c.assignedIP
+			currentState := c.state
+			if currentIP == assignedIP && currentState != StateDisconnected {
 				c.interfaceName = ifaceName
 				c.mu.Unlock()
 				slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
 			} else {
 				c.mu.Unlock()
 				slog.Debug("Skipping interface update: state changed during detection",
-					"expectedIP", assignedIP, "currentIP", c.assignedIP, "state", c.state)
+					"expectedIP", assignedIP, "currentIP", currentIP, "state", currentState)
 			}
 			return
 		}
@@ -270,7 +273,13 @@ func (c *Controller) processOutput(line string) {
 		if ip := event.GetData("ip"); ip != "" {
 			c.setAssignedIP(ip)
 			// Detect the interface in background since it may take a moment to appear.
-			go c.detectInterface(ip)
+			// Verify state under lock before spawning to avoid unnecessary goroutines.
+			c.mu.RLock()
+			shouldDetect := c.assignedIP == ip && c.state != StateDisconnected
+			c.mu.RUnlock()
+			if shouldDetect {
+				go c.detectInterface(ip)
+			}
 		}
 
 	case EventError:
