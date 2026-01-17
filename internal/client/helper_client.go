@@ -140,38 +140,28 @@ func (c *HelperClient) GetInterface() string {
 }
 
 // detectInterface attempts to detect the VPN interface by the assigned IP.
-// It retries with exponential backoff since the interface may take a moment to appear.
-// Before setting the interface name, it verifies the connection state is still valid
-// to avoid overwriting data from a newer connection.
+// It uses DetectInterfaceWithRetry for retry logic, then verifies the connection
+// state is still valid before setting the interface name.
 func (c *HelperClient) detectInterface(assignedIP string) {
-	const maxRetries = 5
-	backoff := 100 * time.Millisecond
-
-	for i := 0; i < maxRetries; i++ {
-		ifaceName, err := vpn.DetectVPNInterface(assignedIP)
-		if err == nil {
-			// Verify state before setting interface to avoid race with newer connections.
-			// Capture current values under lock for logging after unlock.
-			c.mu.Lock()
-			currentIP := c.assignedIP
-			currentState := c.state
-			if currentIP == assignedIP && currentState != vpn.StateDisconnected {
-				c.interfaceName = ifaceName
-				c.mu.Unlock()
-				slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
-			} else {
-				c.mu.Unlock()
-				slog.Debug("Skipping interface update: state changed during detection",
-					"expectedIP", assignedIP, "currentIP", currentIP, "state", currentState)
-			}
-			return
-		}
-
-		time.Sleep(backoff)
-		backoff *= 2
+	ifaceName, err := vpn.DetectInterfaceWithRetry(assignedIP, 5, 100*time.Millisecond, nil)
+	if err != nil {
+		slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP, "error", err)
+		return
 	}
 
-	slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP)
+	// Verify state before setting interface to avoid race with newer connections.
+	c.mu.Lock()
+	currentIP := c.assignedIP
+	currentState := c.state
+	if currentIP == assignedIP && currentState != vpn.StateDisconnected {
+		c.interfaceName = ifaceName
+		c.mu.Unlock()
+		slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
+	} else {
+		c.mu.Unlock()
+		slog.Debug("Skipping interface update: state changed during detection",
+			"expectedIP", assignedIP, "currentIP", currentIP, "state", currentState)
+	}
 }
 
 // CanConnect returns true if a connection can be initiated.

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/shini4i/openfortivpn-gui/internal/fileutil"
 )
 
 const (
@@ -102,14 +104,8 @@ func Save(path string, cfg *Config) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	// Atomic write: write to temp file, then rename
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath) // Clean up temp file on failure
-		return fmt.Errorf("failed to finalize config file: %w", err)
+	if err := fileutil.AtomicWrite(path, data, 0600); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
 	}
 
 	return nil

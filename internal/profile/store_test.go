@@ -388,24 +388,3 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-func TestErrorSentinelBackwardsCompatibility(t *testing.T) {
-	// Verify deprecated error aliases point to the same sentinel values
-	// This ensures backward compatibility with code using old error names
-	assert.Same(t, ErrStoreNotFound, ErrProfileNotFound)
-	assert.Same(t, ErrStoreExists, ErrProfileExists)
-	assert.Same(t, ErrStoreInvalidID, ErrInvalidProfileID)
-
-	// Verify errors.Is works with both old and new names
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	// Load non-existent profile
-	_, err := store.Load("00000000-0000-0000-0000-000000000000")
-	assert.ErrorIs(t, err, ErrStoreNotFound)
-	assert.ErrorIs(t, err, ErrProfileNotFound) // backwards compat
-
-	// Load with invalid ID
-	_, err = store.Load("invalid-id")
-	assert.ErrorIs(t, err, ErrStoreInvalidID)
-	assert.ErrorIs(t, err, ErrInvalidProfileID) // backwards compat
-}

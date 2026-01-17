@@ -2,6 +2,7 @@ package vpn
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -84,4 +85,48 @@ func TestIsVPNInterface_LongerNames(t *testing.T) {
 func TestErrInterfaceNotFound(t *testing.T) {
 	// Verify the error message
 	assert.Equal(t, "VPN interface not found", ErrInterfaceNotFound.Error())
+}
+
+func TestDetectInterfaceWithRetry_DefaultValues(t *testing.T) {
+	// Test that default values are used when 0 is passed
+	var sleepCalls int
+	var totalDuration time.Duration
+	mockSleep := func(d time.Duration) {
+		sleepCalls++
+		totalDuration += d
+	}
+
+	_, err := DetectInterfaceWithRetry("192.0.2.1", 0, 0, mockSleep)
+
+	// Should use defaults: 5 retries with 100ms initial backoff
+	// Sleep is called between retries, so 4 times for 5 retries
+	// Durations: 100 + 200 + 400 + 800 = 1500ms
+	assert.Equal(t, ErrInterfaceNotFound, err)
+	assert.Equal(t, 4, sleepCalls, "should sleep between retries (not after final)")
+	assert.Equal(t, 1500*time.Millisecond, totalDuration, "should use exponential backoff")
+}
+
+func TestDetectInterfaceWithRetry_SingleRetry(t *testing.T) {
+	var sleepCalls int
+	mockSleep := func(d time.Duration) {
+		sleepCalls++
+	}
+
+	_, err := DetectInterfaceWithRetry("192.0.2.1", 1, 10*time.Millisecond, mockSleep)
+
+	// With 1 retry, no sleep should occur (no retry after final attempt)
+	assert.Equal(t, ErrInterfaceNotFound, err)
+	assert.Equal(t, 0, sleepCalls, "single retry should not sleep")
+}
+
+func TestDetectInterfaceWithRetry_InvalidIP(t *testing.T) {
+	noopSleep := func(d time.Duration) {}
+	_, err := DetectInterfaceWithRetry("not-an-ip", 1, 10*time.Millisecond, noopSleep)
+	assert.Equal(t, ErrInterfaceNotFound, err)
+}
+
+func TestDetectInterfaceWithRetry_EmptyIP(t *testing.T) {
+	noopSleep := func(d time.Duration) {}
+	_, err := DetectInterfaceWithRetry("", 1, 10*time.Millisecond, noopSleep)
+	assert.Equal(t, ErrInterfaceNotFound, err)
 }

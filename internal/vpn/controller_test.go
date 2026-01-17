@@ -409,7 +409,7 @@ func TestController_BuildCommandArgs_OTP_Empty(t *testing.T) {
 
 func TestController_Connect_SAML_NoPasswordWritten(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	p := &profile.Profile{
 		ID:         "550e8400-e29b-41d4-a716-446655440000",
@@ -440,7 +440,7 @@ func TestController_Connect_SAML_NoPasswordWritten(t *testing.T) {
 
 func TestController_Connect_SAML_PasswordIgnored(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	p := &profile.Profile{
 		ID:         "550e8400-e29b-41d4-a716-446655440000",
@@ -590,7 +590,7 @@ func TestController_StateTransitionOnDisconnect(t *testing.T) {
 
 func TestController_Connect_Success(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	// Pre-populate stdout with expected output
 	process := executor.GetProcess()
@@ -644,7 +644,7 @@ func TestController_Connect_Success(t *testing.T) {
 func TestController_Connect_ProcessCreateError(t *testing.T) {
 	executor := NewMockExecutor()
 	executor.SetCreateError(errors.New("failed to create process"))
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	p := &profile.Profile{
 		ID:         "550e8400-e29b-41d4-a716-446655440000",
@@ -666,7 +666,7 @@ func TestController_Connect_ProcessCreateError(t *testing.T) {
 func TestController_Connect_ProcessStartError(t *testing.T) {
 	executor := NewMockExecutor()
 	executor.GetProcess().SetStartError(errors.New("failed to start"))
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	p := &profile.Profile{
 		ID:         "550e8400-e29b-41d4-a716-446655440000",
@@ -687,7 +687,7 @@ func TestController_Connect_ProcessStartError(t *testing.T) {
 
 func TestController_Connect_PasswordWrittenToStdin(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	p := &profile.Profile{
 		ID:         "550e8400-e29b-41d4-a716-446655440000",
@@ -714,7 +714,7 @@ func TestController_Connect_PasswordWrittenToStdin(t *testing.T) {
 
 func TestController_Connect_OutputProcessing(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	// Pre-populate with tunnel up message
 	process := executor.GetProcess()
@@ -759,7 +759,7 @@ func TestController_Connect_OutputProcessing(t *testing.T) {
 
 func TestController_Connect_ErrorOutput(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	// Pre-populate with error message
 	process := executor.GetProcess()
@@ -806,7 +806,7 @@ func TestController_Connect_ErrorOutput(t *testing.T) {
 
 func TestController_Connect_IPAssignment(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	// Pre-populate with IP assignment
 	process := executor.GetProcess()
@@ -837,7 +837,7 @@ func TestController_Connect_IPAssignment(t *testing.T) {
 
 func TestController_Disconnect_Success(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	p := &profile.Profile{
 		ID:         "550e8400-e29b-41d4-a716-446655440000",
@@ -870,7 +870,7 @@ func TestController_Disconnect_Success(t *testing.T) {
 
 func TestController_Disconnect_FromConnectedState(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	// Pre-populate with tunnel up message
 	process := executor.GetProcess()
@@ -910,7 +910,7 @@ func TestController_Disconnect_FromConnectedState(t *testing.T) {
 
 func TestController_Disconnect_KillError(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	// Set up Kill to return an error (e.g., user cancelled pkexec auth)
 	process := executor.GetProcess()
@@ -941,7 +941,7 @@ func TestController_Disconnect_KillError(t *testing.T) {
 
 func TestController_ProcessCompletion_AutoDisconnect(t *testing.T) {
 	executor := NewMockExecutor()
-	ctrl := NewControllerWithExecutor("/usr/bin/openfortivpn", executor)
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	p := &profile.Profile{
 		ID:         "550e8400-e29b-41d4-a716-446655440000",

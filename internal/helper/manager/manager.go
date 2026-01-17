@@ -54,7 +54,7 @@ type Manager struct {
 // NewManager creates a new VPN manager with a default controller.
 // This is a convenience wrapper around NewManagerWithController.
 func NewManager(openfortivpnPath string, broadcaster EventBroadcaster) *Manager {
-	return NewManagerWithController(vpn.NewControllerDirect(openfortivpnPath), broadcaster)
+	return NewManagerWithController(vpn.NewController(openfortivpnPath, vpn.WithDirectMode()), broadcaster)
 }
 
 // NewManagerWithController creates a new VPN manager with the provided controller.

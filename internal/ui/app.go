@@ -16,6 +16,7 @@ import (
 	"github.com/shini4i/openfortivpn-gui/internal/config"
 	"github.com/shini4i/openfortivpn-gui/internal/keyring"
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
+	"github.com/shini4i/openfortivpn-gui/internal/reconnect"
 	"github.com/shini4i/openfortivpn-gui/internal/stats"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
@@ -477,15 +478,52 @@ func (a *App) hasProfiles() bool {
 // for nil as a defensive measure in case of GTK threading issues.
 func (a *App) ensureWindow() {
 	if a.window == nil {
+		// Create reconnect manager with config
+		cfg := a.configManager.GetConfig()
+		reconnectCfg := reconnect.Config{
+			MaxAttempts:  cfg.MaxReconnectAttempts,
+			DelaySeconds: cfg.ReconnectDelaySeconds,
+		}
+		// Wrap glib.IdleAdd to match the expected function signature
+		scheduleOnMain := func(fn func()) {
+			glib.IdleAdd(fn)
+		}
+		reconnectManager := reconnect.NewManager(reconnectCfg, scheduleOnMain)
+
+		// Configure reconnect manager
+		reconnectManager.SetPasswordProvider(a.keyringStore)
+		reconnectManager.SetContext(a.ctx)
+		reconnectManager.SetConnectFunc(func(ctx context.Context, p *profile.Profile, password string) error {
+			opts := &vpn.ConnectOptions{Password: password}
+			return a.vpnController.Connect(ctx, p, opts)
+		})
+		reconnectManager.SetCallbacks(reconnect.Callbacks{
+			OnReconnecting: func() {
+				// Callbacks are handled by state change handler in window.go
+			},
+			OnFailed: func(err error) {
+				// When reconnect fails (e.g., password not available), update UI
+				glib.IdleAdd(func() {
+					if a.window != nil {
+						a.window.statusDisplay.SetState(vpn.StateDisconnected)
+					}
+					if a.tray != nil {
+						a.tray.SetState(vpn.StateDisconnected)
+					}
+				})
+			},
+		})
+
 		a.window = NewMainWindow(a.app, &MainWindowDeps{
-			ProfileStore:   a.profileStore,
-			KeyringStore:   a.keyringStore,
-			VPNController:  a.vpnController,
-			ConfigManager:  a.configManager,
-			Tray:           a.tray,
-			Notifier:       a.notifier,
-			StatsCollector: a.statsCollector,
-			Ctx:            a.ctx,
+			ProfileStore:     a.profileStore,
+			KeyringStore:     a.keyringStore,
+			VPNController:    a.vpnController,
+			ConfigManager:    a.configManager,
+			Tray:             a.tray,
+			Notifier:         a.notifier,
+			StatsCollector:   a.statsCollector,
+			ReconnectManager: reconnectManager,
+			Ctx:              a.ctx,
 		})
 
 		// Register callback to track which profile is being connected to

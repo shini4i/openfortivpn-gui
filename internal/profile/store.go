@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/shini4i/openfortivpn-gui/internal/fileutil"
 )
 
 var (
@@ -22,40 +23,20 @@ var (
 	ErrStoreInvalidID = errors.New("invalid profile ID format")
 )
 
-// Backwards compatibility aliases for renamed error sentinels.
-var (
-	// Deprecated: Use ErrStoreNotFound instead.
-	ErrProfileNotFound = ErrStoreNotFound
-	// Deprecated: Use ErrStoreExists instead.
-	ErrProfileExists = ErrStoreExists
-	// Deprecated: Use ErrStoreInvalidID instead.
-	ErrInvalidProfileID = ErrStoreInvalidID
-)
-
-// StoreReader defines read-only operations for profile storage.
-type StoreReader interface {
+// StoreInterface defines the complete interface for profile storage operations.
+// This interface is implemented by Store and can be used for dependency injection
+// and testing purposes.
+type StoreInterface interface {
 	// Load retrieves a profile by ID.
 	Load(id string) (*Profile, error)
 	// List returns all stored profiles along with any errors encountered.
 	List() (*ListResult, error)
 	// Exists checks if a profile with the given ID exists.
 	Exists(id string) (bool, error)
-}
-
-// StoreWriter defines write operations for profile storage.
-type StoreWriter interface {
 	// Save persists a profile to disk.
 	Save(p *Profile) error
 	// Delete removes a profile by ID.
 	Delete(id string) error
-}
-
-// StoreInterface defines the complete interface for profile storage operations.
-// This interface is implemented by Store and can be used for dependency injection
-// and testing purposes.
-type StoreInterface interface {
-	StoreReader
-	StoreWriter
 }
 
 // Compile-time check that Store implements StoreInterface.
@@ -110,14 +91,8 @@ func (s *Store) Save(p *Profile) error {
 		return err
 	}
 
-	// Atomic write: write to temp file, then rename
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write profile file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath) // Clean up temp file on failure
-		return fmt.Errorf("failed to finalize profile file: %w", err)
+	if err := fileutil.AtomicWrite(path, data, 0600); err != nil {
+		return fmt.Errorf("failed to save profile: %w", err)
 	}
 
 	return nil
