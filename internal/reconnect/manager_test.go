@@ -166,12 +166,9 @@ func TestManager_ShouldReconnect_MaxAttemptsReached(t *testing.T) {
 }
 
 func TestManager_StartReconnect(t *testing.T) {
-	var mu sync.Mutex
-	var scheduledFunc func()
+	scheduled := make(chan struct{})
 	scheduleOnMain := func(fn func()) {
-		mu.Lock()
-		scheduledFunc = fn
-		mu.Unlock()
+		close(scheduled)
 	}
 
 	cfg := Config{MaxAttempts: 3, DelaySeconds: 0} // 0 delay for testing
@@ -186,10 +183,12 @@ func TestManager_StartReconnect(t *testing.T) {
 	assert.Equal(t, 1, m.attemptCount)
 
 	// Wait for timer to fire
-	time.Sleep(50 * time.Millisecond)
-	mu.Lock()
-	assert.NotNil(t, scheduledFunc)
-	mu.Unlock()
+	select {
+	case <-scheduled:
+		// Success - scheduleOnMain was called
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("scheduleOnMain was not called within timeout")
+	}
 }
 
 func TestManager_Cancel(t *testing.T) {
