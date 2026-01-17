@@ -19,6 +19,10 @@ type VPNController interface {
 	// Returns empty string if not connected.
 	GetAssignedIP() string
 
+	// GetInterface returns the network interface name used by the VPN tunnel.
+	// Returns empty string if not connected or interface not detected.
+	GetInterface() string
+
 	// CanConnect returns true if a connection can be initiated from the current state.
 	CanConnect() bool
 

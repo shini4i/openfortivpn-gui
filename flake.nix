@@ -14,7 +14,7 @@
       {
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [
-            go
+            go_1_25
             go-task
             pkg-config
             gobject-introspection

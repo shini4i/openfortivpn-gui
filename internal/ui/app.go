@@ -16,6 +16,7 @@ import (
 	"github.com/shini4i/openfortivpn-gui/internal/config"
 	"github.com/shini4i/openfortivpn-gui/internal/keyring"
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
+	"github.com/shini4i/openfortivpn-gui/internal/stats"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
 
@@ -45,6 +46,9 @@ type App struct {
 
 	// Notification manager
 	notifier *Notifier
+
+	// Stats collector for network traffic statistics
+	statsCollector *stats.Collector
 
 	// Application-level context for VPN operations
 	ctx       context.Context
@@ -113,14 +117,18 @@ func NewApp(cfg *AppConfig) (*App, error) {
 		vpnController = vpn.NewController(openfortivpnPath)
 	}
 
+	// Initialize stats collector
+	statsCollector := stats.NewCollector(0) // Use default poll interval
+
 	app := &App{
-		configManager: configManager,
-		profileStore:  profileStore,
-		keyringStore:  keyringStore,
-		vpnController: vpnController,
-		usingHelper:   usingHelper,
-		ctx:           ctx,
-		ctxCancel:     cancel,
+		configManager:  configManager,
+		profileStore:   profileStore,
+		keyringStore:   keyringStore,
+		vpnController:  vpnController,
+		usingHelper:    usingHelper,
+		statsCollector: statsCollector,
+		ctx:            ctx,
+		ctxCancel:      cancel,
 	}
 
 	return app, nil
@@ -414,6 +422,11 @@ func (a *App) initTray() {
 func (a *App) onShutdown() {
 	slog.Info("Application shutting down")
 
+	// Stop stats collector
+	if a.statsCollector != nil {
+		a.statsCollector.Stop()
+	}
+
 	// Cancel the application context to signal VPN operations to terminate
 	if a.ctxCancel != nil {
 		a.ctxCancel()
@@ -465,13 +478,14 @@ func (a *App) hasProfiles() bool {
 func (a *App) ensureWindow() {
 	if a.window == nil {
 		a.window = NewMainWindow(a.app, &MainWindowDeps{
-			ProfileStore:  a.profileStore,
-			KeyringStore:  a.keyringStore,
-			VPNController: a.vpnController,
-			ConfigManager: a.configManager,
-			Tray:          a.tray,
-			Notifier:      a.notifier,
-			Ctx:           a.ctx,
+			ProfileStore:   a.profileStore,
+			KeyringStore:   a.keyringStore,
+			VPNController:  a.vpnController,
+			ConfigManager:  a.configManager,
+			Tray:           a.tray,
+			Notifier:       a.notifier,
+			StatsCollector: a.statsCollector,
+			Ctx:            a.ctx,
 		})
 
 		// Register callback to track which profile is being connected to

@@ -15,6 +15,7 @@ import (
 	"github.com/shini4i/openfortivpn-gui/internal/config"
 	"github.com/shini4i/openfortivpn-gui/internal/keyring"
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
+	"github.com/shini4i/openfortivpn-gui/internal/stats"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
 
@@ -39,12 +40,13 @@ type reconnectState struct {
 
 // MainWindowDeps holds the dependencies required by MainWindow.
 type MainWindowDeps struct {
-	ProfileStore  profile.StoreInterface
-	KeyringStore  keyring.Store
-	VPNController vpn.VPNController
-	ConfigManager *config.Manager
-	Tray          *TrayIcon
-	Notifier      *Notifier
+	ProfileStore   profile.StoreInterface
+	KeyringStore   keyring.Store
+	VPNController  vpn.VPNController
+	ConfigManager  *config.Manager
+	Tray           *TrayIcon
+	Notifier       *Notifier
+	StatsCollector *stats.Collector
 	// Ctx is the application-level context for VPN operations.
 	// When cancelled, ongoing VPN connections should be terminated.
 	Ctx context.Context
@@ -60,6 +62,7 @@ type MainWindow struct {
 	profileList   *ProfileList
 	profileEditor *ProfileEditor
 	statusDisplay *StatusDisplay
+	statsDisplay  *StatsDisplay
 	connectButton *gtk.Button
 	logDialog     *LogDialog
 
@@ -117,6 +120,7 @@ func (w *MainWindow) setupLayout() {
 	// Create content area (profile editor + status)
 	w.profileEditor = NewProfileEditor()
 	w.statusDisplay = NewStatusDisplay()
+	w.statsDisplay = NewStatsDisplay()
 	contentPage := w.createContentPage()
 	w.splitView.SetContent(contentPage)
 
@@ -187,6 +191,9 @@ func (w *MainWindow) createContentPage() *adw.NavigationPage {
 
 	// Add compact status display at top
 	contentBox.Append(w.statusDisplay.Widget())
+
+	// Add stats display (hidden by default, shown when connected)
+	contentBox.Append(w.statsDisplay.Widget())
 
 	// Separator
 	sep := gtk.NewSeparator(gtk.OrientationHorizontal)
@@ -311,6 +318,17 @@ func (w *MainWindow) setupCallbacks() {
 			case vpn.StateReconnecting:
 				w.deps.Notifier.NotifyReconnecting(profileName)
 			}
+		}
+
+		// Manage stats collector and display based on actual connection state (not displayState)
+		// to ensure proper cleanup during reconnects and avoid carrying stale baseline data
+		switch newState {
+		case vpn.StateConnected:
+			w.statsDisplay.SetVisible(true)
+			w.startStatsCollector()
+		case vpn.StateDisconnected, vpn.StateFailed:
+			w.statsDisplay.SetVisible(false)
+			w.stopStatsCollector()
 		}
 	})
 
@@ -688,6 +706,11 @@ func (w *MainWindow) Window() *adw.ApplicationWindow {
 	return w.window
 }
 
+// GetStatsDisplay returns the stats display widget for external updates.
+func (w *MainWindow) GetStatsDisplay() *StatsDisplay {
+	return w.statsDisplay
+}
+
 // triggerConnect initiates a connection from external sources (e.g., system tray).
 // It uses the currently selected profile.
 func (w *MainWindow) triggerConnect() {
@@ -912,4 +935,75 @@ func (w *MainWindow) openBrowser(url string) {
 		slog.Error("Failed to open browser", "error", err)
 		w.showError("Browser Error", "Failed to open browser for SAML authentication: "+err.Error())
 	}
+}
+
+// startStatsCollector starts the stats collector for the current VPN interface.
+// It registers callbacks to update the stats display and tray menu.
+// Uses retries because interface detection may still be in progress when StateConnected is reached.
+func (w *MainWindow) startStatsCollector() {
+	if w.deps.StatsCollector == nil {
+		return
+	}
+
+	// Register stats update callback (safe to call multiple times - just updates the callback)
+	// The callback runs on the polling goroutine, so UI updates must be marshaled to main thread
+	w.deps.StatsCollector.OnStats(func(s stats.NetworkStats) {
+		// Update stats display widget (already marshals via glib.IdleAdd internally)
+		w.statsDisplay.SetStats(s)
+
+		// Update tray menu - must marshal to GTK main thread
+		if w.deps.Tray != nil {
+			glib.IdleAdd(func() {
+				w.deps.Tray.SetStats(s)
+			})
+		}
+	})
+
+	// Try to start the collector with retries (interface detection is async)
+	go w.startStatsCollectorWithRetry()
+}
+
+// startStatsCollectorWithRetry attempts to start the stats collector with retries.
+// Interface detection runs asynchronously after StateConnected, so we retry if interface isn't ready.
+func (w *MainWindow) startStatsCollectorWithRetry() {
+	const (
+		maxRetries = 10
+		maxBackoff = 2 * time.Second
+	)
+	backoff := 200 * time.Millisecond
+
+	for i := 0; i < maxRetries; i++ {
+		ifaceName := w.deps.VPNController.GetInterface()
+		if ifaceName != "" {
+			if err := w.deps.StatsCollector.Start(ifaceName); err != nil {
+				slog.Warn("Failed to start stats collector", "interface", ifaceName, "error", err)
+			} else {
+				slog.Debug("Stats collector started", "interface", ifaceName, "attempt", i+1)
+			}
+			return
+		}
+
+		// Check if still connected before retrying
+		state := w.deps.VPNController.GetState()
+		if state != vpn.StateConnected {
+			slog.Debug("Stats collector retry aborted: no longer connected")
+			return
+		}
+
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+
+	slog.Debug("Stats collector not started: interface not detected after retries")
+}
+
+// stopStatsCollector stops the stats collector if it's running.
+func (w *MainWindow) stopStatsCollector() {
+	if w.deps.StatsCollector == nil {
+		return
+	}
+	w.deps.StatsCollector.Stop()
 }

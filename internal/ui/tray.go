@@ -9,6 +9,7 @@ import (
 
 	"fyne.io/systray"
 
+	"github.com/shini4i/openfortivpn-gui/internal/stats"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
 
@@ -30,11 +31,12 @@ type TrayIcon struct {
 	profileName string
 
 	// Menu items
-	menuStatus     *systray.MenuItem
-	menuConnect    *systray.MenuItem
-	menuDisconnect *systray.MenuItem
-	menuShow       *systray.MenuItem
-	menuQuit       *systray.MenuItem
+	menuStatus      *systray.MenuItem
+	menuTrafficRate *systray.MenuItem
+	menuConnect     *systray.MenuItem
+	menuDisconnect  *systray.MenuItem
+	menuShow        *systray.MenuItem
+	menuQuit        *systray.MenuItem
 
 	// Callbacks - must be set before Run() is called
 	onConnect    func()
@@ -131,6 +133,19 @@ func (t *TrayIcon) SetProfileName(name string) {
 	t.updateMenu()
 }
 
+// SetStats updates the traffic rate display in the tray menu.
+func (t *TrayIcon) SetStats(s stats.NetworkStats) {
+	if t.menuTrafficRate == nil {
+		return
+	}
+
+	rateText := fmt.Sprintf("↓ %s  ↑ %s",
+		stats.FormatRate(s.RxBytesPerSec),
+		stats.FormatRate(s.TxBytesPerSec))
+
+	t.menuTrafficRate.SetTitle(rateText)
+}
+
 // Run starts the system tray icon. This should be called in a goroutine
 // as it blocks until the tray is closed. All callbacks (OnConnect, OnDisconnect,
 // OnShow, OnQuit) must be registered before calling Run().
@@ -175,6 +190,10 @@ func (t *TrayIcon) onReady() {
 	// Create menu items
 	t.menuStatus = systray.AddMenuItem("Status: Disconnected", "Current connection status")
 	t.menuStatus.Disable()
+
+	t.menuTrafficRate = systray.AddMenuItem("", "Current traffic rates")
+	t.menuTrafficRate.Disable()
+	t.menuTrafficRate.Hide()
 
 	systray.AddSeparator()
 
@@ -300,6 +319,15 @@ func (t *TrayIcon) updateMenu() {
 		statusText = "Status: Disconnected"
 	}
 	t.menuStatus.SetTitle(statusText)
+
+	// Show/hide traffic rate based on connection state
+	if t.menuTrafficRate != nil {
+		if state == vpn.StateConnected {
+			t.menuTrafficRate.Show()
+		} else {
+			t.menuTrafficRate.Hide()
+		}
+	}
 
 	// Update connect menu item to show which profile will be used
 	if profileName != "" && state.CanConnect() {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
 )
@@ -27,9 +28,10 @@ type Controller struct {
 	executor         ProcessExecutor
 	directMode       bool // When true, run openfortivpn directly without pkexec
 
-	mu         sync.RWMutex
-	state      ConnectionState
-	assignedIP string
+	mu            sync.RWMutex
+	state         ConnectionState
+	assignedIP    string
+	interfaceName string
 
 	// Process management
 	process Process
@@ -156,6 +158,56 @@ func (c *Controller) setAssignedIP(ip string) {
 	c.assignedIP = ip
 }
 
+// GetInterface returns the network interface name used by the VPN tunnel.
+func (c *Controller) GetInterface() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.interfaceName
+}
+
+// setInterface sets the interface name.
+func (c *Controller) setInterface(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.interfaceName = name
+}
+
+// detectInterface attempts to detect the VPN interface by the assigned IP.
+// It retries with exponential backoff since the interface may take a moment to appear.
+// Before setting the interface name, it verifies the connection state is still valid
+// to avoid overwriting data from a newer connection.
+func (c *Controller) detectInterface(assignedIP string) {
+	const maxRetries = 5
+	backoff := 100 * time.Millisecond
+
+	for i := 0; i < maxRetries; i++ {
+		ifaceName, err := DetectVPNInterface(assignedIP)
+		if err == nil {
+			// Verify state before setting interface to avoid race with newer connections.
+			// Capture current values under lock for logging after unlock.
+			c.mu.Lock()
+			currentIP := c.assignedIP
+			currentState := c.state
+			if currentIP == assignedIP && currentState != StateDisconnected {
+				c.interfaceName = ifaceName
+				c.mu.Unlock()
+				slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
+			} else {
+				c.mu.Unlock()
+				slog.Debug("Skipping interface update: state changed during detection",
+					"expectedIP", assignedIP, "currentIP", currentIP, "state", currentState)
+			}
+			return
+		}
+
+		// Wait before retry.
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+
+	slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP)
+}
+
 // emitOutput sends a raw output line to the registered callback.
 func (c *Controller) emitOutput(line string) {
 	c.mu.RLock()
@@ -212,6 +264,7 @@ func (c *Controller) processOutput(line string) {
 
 	case EventDisconnected:
 		c.setAssignedIP("")
+		c.setInterface("")
 		if err := c.setState(StateDisconnected); err != nil {
 			c.emitError(fmt.Errorf("state transition failed: %w", err))
 		}
@@ -219,6 +272,14 @@ func (c *Controller) processOutput(line string) {
 	case EventGotIP:
 		if ip := event.GetData("ip"); ip != "" {
 			c.setAssignedIP(ip)
+			// Detect the interface in background since it may take a moment to appear.
+			// Verify state under lock before spawning to avoid unnecessary goroutines.
+			c.mu.RLock()
+			shouldDetect := c.assignedIP == ip && c.state != StateDisconnected
+			c.mu.RUnlock()
+			if shouldDetect {
+				go c.detectInterface(ip)
+			}
 		}
 
 	case EventError:
