@@ -30,9 +30,10 @@ func TestAtomicWrite(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 
-	// Verify temp file was cleaned up
-	_, err = os.Stat(path + ".tmp")
-	assert.True(t, os.IsNotExist(err))
+	// Verify temp file was cleaned up (pattern matches AtomicWrite's temp file naming)
+	matches, err := filepath.Glob(path + ".tmp.*")
+	require.NoError(t, err)
+	assert.Empty(t, matches, "no temp files should remain after successful write")
 }
 
 func TestAtomicWrite_OverwriteExisting(t *testing.T) {
