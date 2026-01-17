@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -197,8 +198,16 @@ func (c *Collector) readInterfaceStats(ifaceName string) (rx, tx uint64, err err
 }
 
 // readStatFile reads a single stat file and parses it as uint64.
+// The path is validated to ensure it's within the expected sysfs location.
 func (c *Collector) readStatFile(path string) (uint64, error) {
-	data, err := os.ReadFile(path)
+	// Validate path is within expected sysfs location to prevent path traversal.
+	// Clean the path and verify it starts with the expected base.
+	cleanPath := filepath.Clean(path)
+	if !strings.HasPrefix(cleanPath, sysfsNetPath+string(filepath.Separator)) {
+		return 0, errors.New("invalid stats path: outside sysfs network directory")
+	}
+
+	data, err := os.ReadFile(cleanPath) // #nosec G304 -- path validated above
 	if err != nil {
 		return 0, err
 	}
