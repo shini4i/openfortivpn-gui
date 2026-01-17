@@ -50,3 +50,38 @@ func TestDetectVPNInterface_NonExistentIP(t *testing.T) {
 	_, err := DetectVPNInterface("192.0.2.1")
 	assert.Equal(t, ErrInterfaceNotFound, err)
 }
+
+func TestDetectVPNInterface_IPv6Format(t *testing.T) {
+	// Use a valid IPv6 format that is unlikely to be assigned locally
+	_, err := DetectVPNInterface("2001:db8::1")
+	assert.Equal(t, ErrInterfaceNotFound, err)
+}
+
+func TestIsVPNInterface_LongerNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		ifaceName string
+		expected  bool
+	}{
+		{"ppp100", "ppp100", true},
+		{"tun123", "tun123", true},
+		{"tap999", "tap999", true},
+		{"ppp with suffix", "ppp0s0", true},
+		{"tun with suffix", "tun0_vpn", true},
+		{"almost ppp", "xppp0", false},
+		{"almost tun", "vtun0", false},
+		{"ppp lowercase only", "PPP0", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isVPNInterface(tt.ifaceName)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestErrInterfaceNotFound(t *testing.T) {
+	// Verify the error message
+	assert.Equal(t, "VPN interface not found", ErrInterfaceNotFound.Error())
+}

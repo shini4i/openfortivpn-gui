@@ -174,6 +174,8 @@ func (c *Controller) setInterface(name string) {
 
 // detectInterface attempts to detect the VPN interface by the assigned IP.
 // It retries with exponential backoff since the interface may take a moment to appear.
+// Before setting the interface name, it verifies the connection state is still valid
+// to avoid overwriting data from a newer connection.
 func (c *Controller) detectInterface(assignedIP string) {
 	const maxRetries = 5
 	backoff := 100 * time.Millisecond
@@ -181,8 +183,17 @@ func (c *Controller) detectInterface(assignedIP string) {
 	for i := 0; i < maxRetries; i++ {
 		ifaceName, err := DetectVPNInterface(assignedIP)
 		if err == nil {
-			c.setInterface(ifaceName)
-			slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
+			// Verify state before setting interface to avoid race with newer connections
+			c.mu.Lock()
+			if c.assignedIP == assignedIP && c.state != StateDisconnected {
+				c.interfaceName = ifaceName
+				c.mu.Unlock()
+				slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
+			} else {
+				c.mu.Unlock()
+				slog.Debug("Skipping interface update: state changed during detection",
+					"expectedIP", assignedIP, "currentIP", c.assignedIP, "state", c.state)
+			}
 			return
 		}
 

@@ -141,6 +141,8 @@ func (c *HelperClient) GetInterface() string {
 
 // detectInterface attempts to detect the VPN interface by the assigned IP.
 // It retries with exponential backoff since the interface may take a moment to appear.
+// Before setting the interface name, it verifies the connection state is still valid
+// to avoid overwriting data from a newer connection.
 func (c *HelperClient) detectInterface(assignedIP string) {
 	const maxRetries = 5
 	backoff := 100 * time.Millisecond
@@ -148,10 +150,17 @@ func (c *HelperClient) detectInterface(assignedIP string) {
 	for i := 0; i < maxRetries; i++ {
 		ifaceName, err := vpn.DetectVPNInterface(assignedIP)
 		if err == nil {
+			// Verify state before setting interface to avoid race with newer connections
 			c.mu.Lock()
-			c.interfaceName = ifaceName
-			c.mu.Unlock()
-			slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
+			if c.assignedIP == assignedIP && c.state != vpn.StateDisconnected {
+				c.interfaceName = ifaceName
+				c.mu.Unlock()
+				slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
+			} else {
+				c.mu.Unlock()
+				slog.Debug("Skipping interface update: state changed during detection",
+					"expectedIP", assignedIP, "currentIP", c.assignedIP, "state", c.state)
+			}
 			return
 		}
 
@@ -257,7 +266,13 @@ func (c *HelperClient) syncState() error {
 	c.mu.Lock()
 	c.state = vpn.ConnectionState(status.State)
 	c.assignedIP = status.AssignedIP
+	assignedIP := status.AssignedIP
 	c.mu.Unlock()
+
+	// If we restored a connected state with an assigned IP, detect the interface
+	if assignedIP != "" {
+		go c.detectInterface(assignedIP)
+	}
 
 	return nil
 }

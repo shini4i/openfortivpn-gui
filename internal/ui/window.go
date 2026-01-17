@@ -320,8 +320,9 @@ func (w *MainWindow) setupCallbacks() {
 			}
 		}
 
-		// Manage stats collector and display based on connection state
-		switch displayState {
+		// Manage stats collector and display based on actual connection state (not displayState)
+		// to ensure proper cleanup during reconnects and avoid carrying stale baseline data
+		switch newState {
 		case vpn.StateConnected:
 			w.statsDisplay.SetVisible(true)
 			w.startStatsCollector()
@@ -945,13 +946,16 @@ func (w *MainWindow) startStatsCollector() {
 	}
 
 	// Register stats update callback (safe to call multiple times - just updates the callback)
+	// The callback runs on the polling goroutine, so UI updates must be marshaled to main thread
 	w.deps.StatsCollector.OnStats(func(s stats.NetworkStats) {
-		// Update stats display widget
+		// Update stats display widget (already marshals via glib.IdleAdd internally)
 		w.statsDisplay.SetStats(s)
 
-		// Update tray menu
+		// Update tray menu - must marshal to GTK main thread
 		if w.deps.Tray != nil {
-			w.deps.Tray.SetStats(s)
+			glib.IdleAdd(func() {
+				w.deps.Tray.SetStats(s)
+			})
 		}
 	})
 
@@ -962,7 +966,10 @@ func (w *MainWindow) startStatsCollector() {
 // startStatsCollectorWithRetry attempts to start the stats collector with retries.
 // Interface detection runs asynchronously after StateConnected, so we retry if interface isn't ready.
 func (w *MainWindow) startStatsCollectorWithRetry() {
-	const maxRetries = 10
+	const (
+		maxRetries = 10
+		maxBackoff = 2 * time.Second
+	)
 	backoff := 200 * time.Millisecond
 
 	for i := 0; i < maxRetries; i++ {
@@ -984,7 +991,10 @@ func (w *MainWindow) startStatsCollectorWithRetry() {
 		}
 
 		time.Sleep(backoff)
-		backoff = time.Duration(float64(backoff) * 1.5) // Exponential backoff
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
 	}
 
 	slog.Debug("Stats collector not started: interface not detected after retries")

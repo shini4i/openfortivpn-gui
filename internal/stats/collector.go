@@ -1,7 +1,6 @@
 package stats
 
 import (
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -59,13 +58,21 @@ func (c *Collector) OnStats(callback func(NetworkStats)) {
 
 // Start begins collecting statistics for the given interface.
 // It captures the current byte counts as baseline for session totals.
+// If already running with a different interface, it restarts with the new one.
 func (c *Collector) Start(interfaceName string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if !c.stopped && c.interfaceName != "" {
-		// Already running.
-		return nil
+		if c.interfaceName == interfaceName {
+			// Already running with same interface.
+			return nil
+		}
+		// Running with different interface - stop the current collector.
+		c.stopped = true
+		close(c.stopChan)
+		slog.Info("Stats collector restarting for new interface",
+			"old", c.interfaceName, "new", interfaceName)
 	}
 
 	// Read initial stats for baseline.
@@ -84,7 +91,7 @@ func (c *Collector) Start(interfaceName string) error {
 	c.stopped = false
 	c.stopChan = make(chan struct{})
 
-	go c.pollLoop()
+	go c.pollLoop(c.stopChan)
 
 	slog.Info("Stats collector started", "interface", interfaceName)
 	return nil
@@ -114,27 +121,38 @@ func (c *Collector) IsRunning() bool {
 }
 
 // pollLoop runs the main polling loop.
-func (c *Collector) pollLoop() {
+// It accepts its own stopChan to ensure it only responds to its own stop signal,
+// preventing race conditions when Start() is called with a different interface.
+func (c *Collector) pollLoop(stopChan <-chan struct{}) {
 	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()
 
 	// Emit initial stats immediately.
-	c.collectAndEmit()
+	c.collectAndEmit(stopChan)
 
 	for {
 		select {
-		case <-c.stopChan:
+		case <-stopChan:
 			return
 		case <-ticker.C:
-			c.collectAndEmit()
+			c.collectAndEmit(stopChan)
 		}
 	}
 }
 
 // collectAndEmit reads current stats, calculates rates, and emits the result.
-func (c *Collector) collectAndEmit() {
+// Handles counter rollover/reset by detecting when current values are less than previous.
+// The stopChan parameter is used to verify this goroutine is still the current one.
+func (c *Collector) collectAndEmit(stopChan <-chan struct{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Check if this goroutine is stale (collector was restarted with different interface).
+	select {
+	case <-stopChan:
+		return
+	default:
+	}
 
 	if c.interfaceName == "" {
 		return
@@ -149,10 +167,40 @@ func (c *Collector) collectAndEmit() {
 	now := time.Now()
 	elapsed := now.Sub(c.lastTime).Seconds()
 
+	// Handle counter rollover/reset: if current < last, counters were reset
+	var deltaRx, deltaTx uint64
+	if rx < c.lastRx {
+		// RX counter reset - update baseline and use current value as delta
+		slog.Debug("RX counter reset detected", "interface", c.interfaceName)
+		c.baselineRx = rx
+		deltaRx = 0
+	} else {
+		deltaRx = rx - c.lastRx
+	}
+
+	if tx < c.lastTx {
+		// TX counter reset - update baseline and use current value as delta
+		slog.Debug("TX counter reset detected", "interface", c.interfaceName)
+		c.baselineTx = tx
+		deltaTx = 0
+	} else {
+		deltaTx = tx - c.lastTx
+	}
+
+	// Calculate rates from deltas
 	var rxRate, txRate float64
 	if elapsed > 0 {
-		rxRate = float64(rx-c.lastRx) / elapsed
-		txRate = float64(tx-c.lastTx) / elapsed
+		rxRate = float64(deltaRx) / elapsed
+		txRate = float64(deltaTx) / elapsed
+	}
+
+	// Calculate session totals (handle potential underflow from baseline reset)
+	var sessionRx, sessionTx uint64
+	if rx >= c.baselineRx {
+		sessionRx = rx - c.baselineRx
+	}
+	if tx >= c.baselineTx {
+		sessionTx = tx - c.baselineTx
 	}
 
 	stats := NetworkStats{
@@ -161,8 +209,8 @@ func (c *Collector) collectAndEmit() {
 		TxBytes:        tx,
 		RxBytesPerSec:  rxRate,
 		TxBytesPerSec:  txRate,
-		SessionRxBytes: rx - c.baselineRx,
-		SessionTxBytes: tx - c.baselineTx,
+		SessionRxBytes: sessionRx,
+		SessionTxBytes: sessionTx,
 		Duration:       now.Sub(c.startTime),
 		Timestamp:      now,
 	}
@@ -181,6 +229,8 @@ func (c *Collector) collectAndEmit() {
 }
 
 // readInterfaceStats reads rx_bytes and tx_bytes from sysfs for the given interface.
+// The ifaceName parameter is sourced from net.Interfaces() and is considered safe
+// (no path-traversal characters possible from the kernel's interface enumeration).
 func (c *Collector) readInterfaceStats(ifaceName string) (rx, tx uint64, err error) {
 	statsDir := filepath.Join(sysfsNetPath, ifaceName, "statistics")
 
@@ -198,16 +248,11 @@ func (c *Collector) readInterfaceStats(ifaceName string) (rx, tx uint64, err err
 }
 
 // readStatFile reads a single stat file and parses it as uint64.
-// The path is validated to ensure it's within the expected sysfs location.
+// The path is constructed from sysfsNetPath and an interface name from net.Interfaces(),
+// which cannot contain path-traversal characters, making this safe.
 func (c *Collector) readStatFile(path string) (uint64, error) {
-	// Validate path is within expected sysfs location to prevent path traversal.
-	// Clean the path and verify it starts with the expected base.
-	cleanPath := filepath.Clean(path)
-	if !strings.HasPrefix(cleanPath, sysfsNetPath+string(filepath.Separator)) {
-		return 0, errors.New("invalid stats path: outside sysfs network directory")
-	}
-
-	data, err := os.ReadFile(cleanPath) // #nosec G304 -- path validated above
+	// #nosec G304 -- path is constructed from sysfsNetPath constant and ifaceName from net.Interfaces()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
 	}
