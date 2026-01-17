@@ -36,6 +36,21 @@ func TestAtomicWrite(t *testing.T) {
 	assert.Empty(t, matches, "no temp files should remain after successful write")
 }
 
+func TestAtomicWrite_CustomPermissions(t *testing.T) {
+	dir, err := os.MkdirTemp("", "atomic-write-test")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	path := filepath.Join(dir, "custom-perm.txt")
+
+	err = AtomicWrite(path, []byte("custom permissions test"), 0644)
+	require.NoError(t, err)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0644), info.Mode().Perm())
+}
+
 func TestAtomicWrite_OverwriteExisting(t *testing.T) {
 	dir, err := os.MkdirTemp("", "atomic-write-test")
 	require.NoError(t, err)
