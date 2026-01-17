@@ -46,35 +46,38 @@ type Controller struct {
 	onError       func(err error)
 }
 
+// ControllerOption configures a Controller.
+type ControllerOption func(*Controller)
+
+// WithExecutor sets a custom process executor (primarily for testing).
+func WithExecutor(executor ProcessExecutor) ControllerOption {
+	return func(c *Controller) {
+		c.executor = executor
+	}
+}
+
+// WithDirectMode configures the controller for direct execution without pkexec.
+// This is intended for the helper daemon which already runs with root privileges.
+func WithDirectMode() ControllerOption {
+	return func(c *Controller) {
+		c.directMode = true
+		c.executor = NewDirectExecutor()
+	}
+}
+
 // NewController creates a new VPN controller instance.
-func NewController(openfortivpnPath string) *Controller {
-	return &Controller{
+// By default, it uses RealExecutor with pkexec for privilege escalation.
+// Use WithExecutor or WithDirectMode options to customize behavior.
+func NewController(openfortivpnPath string, opts ...ControllerOption) *Controller {
+	c := &Controller{
 		openfortivpnPath: openfortivpnPath,
 		executor:         NewRealExecutor(),
 		state:            StateDisconnected,
 	}
-}
-
-// NewControllerWithExecutor creates a new VPN controller with a custom executor.
-// This is primarily used for testing.
-func NewControllerWithExecutor(openfortivpnPath string, executor ProcessExecutor) *Controller {
-	return &Controller{
-		openfortivpnPath: openfortivpnPath,
-		executor:         executor,
-		state:            StateDisconnected,
+	for _, opt := range opts {
+		opt(c)
 	}
-}
-
-// NewControllerDirect creates a VPN controller that runs openfortivpn directly
-// without pkexec privilege escalation. This is intended for use by the helper
-// daemon which already runs with root privileges.
-func NewControllerDirect(openfortivpnPath string) *Controller {
-	return &Controller{
-		openfortivpnPath: openfortivpnPath,
-		executor:         NewDirectExecutor(),
-		directMode:       true,
-		state:            StateDisconnected,
-	}
+	return c
 }
 
 // GetState returns the current connection state.
@@ -173,39 +176,28 @@ func (c *Controller) setInterface(name string) {
 }
 
 // detectInterface attempts to detect the VPN interface by the assigned IP.
-// It retries with exponential backoff since the interface may take a moment to appear.
-// Before setting the interface name, it verifies the connection state is still valid
-// to avoid overwriting data from a newer connection.
+// It uses DetectInterfaceWithRetry for retry logic, then verifies the connection
+// state is still valid before setting the interface name.
 func (c *Controller) detectInterface(assignedIP string) {
-	const maxRetries = 5
-	backoff := 100 * time.Millisecond
-
-	for i := 0; i < maxRetries; i++ {
-		ifaceName, err := DetectVPNInterface(assignedIP)
-		if err == nil {
-			// Verify state before setting interface to avoid race with newer connections.
-			// Capture current values under lock for logging after unlock.
-			c.mu.Lock()
-			currentIP := c.assignedIP
-			currentState := c.state
-			if currentIP == assignedIP && currentState != StateDisconnected {
-				c.interfaceName = ifaceName
-				c.mu.Unlock()
-				slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
-			} else {
-				c.mu.Unlock()
-				slog.Debug("Skipping interface update: state changed during detection",
-					"expectedIP", assignedIP, "currentIP", currentIP, "state", currentState)
-			}
-			return
-		}
-
-		// Wait before retry.
-		time.Sleep(backoff)
-		backoff *= 2
+	ifaceName, err := DetectInterfaceWithRetry(assignedIP, 5, 100*time.Millisecond)
+	if err != nil {
+		slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP)
+		return
 	}
 
-	slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP)
+	// Verify state before setting interface to avoid race with newer connections.
+	c.mu.Lock()
+	currentIP := c.assignedIP
+	currentState := c.state
+	if currentIP == assignedIP && currentState != StateDisconnected {
+		c.interfaceName = ifaceName
+		c.mu.Unlock()
+		slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
+	} else {
+		c.mu.Unlock()
+		slog.Debug("Skipping interface update: state changed during detection",
+			"expectedIP", assignedIP, "currentIP", currentIP, "state", currentState)
+	}
 }
 
 // emitOutput sends a raw output line to the registered callback.

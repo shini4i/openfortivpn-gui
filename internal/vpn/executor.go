@@ -31,12 +31,38 @@ type ProcessExecutor interface {
 }
 
 // cmdWithPipes holds a command and its associated pipes.
-// This is used as the common base for both realProcess and directProcess.
+// This is used as the common base for both realProcess and directProcess,
+// providing shared implementations for Start, Wait, and pipe accessors.
 type cmdWithPipes struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr io.ReadCloser
+}
+
+// Start starts the process but does not wait for it to complete.
+func (p *cmdWithPipes) Start() error {
+	return p.cmd.Start()
+}
+
+// Wait waits for the process to exit and returns the error.
+func (p *cmdWithPipes) Wait() error {
+	return p.cmd.Wait()
+}
+
+// Stdin returns a writer to the process's stdin.
+func (p *cmdWithPipes) Stdin() io.WriteCloser {
+	return p.stdin
+}
+
+// Stdout returns a reader from the process's stdout.
+func (p *cmdWithPipes) Stdout() io.ReadCloser {
+	return p.stdout
+}
+
+// Stderr returns a reader from the process's stderr.
+func (p *cmdWithPipes) Stderr() io.ReadCloser {
+	return p.stderr
 }
 
 // newCmdWithPipes creates a command with stdin/stdout/stderr pipes configured.
@@ -93,16 +119,10 @@ func (e *RealExecutor) CreateProcess(ctx context.Context, name string, args ...s
 }
 
 // realProcess wraps exec.Cmd to implement Process interface.
+// It embeds cmdWithPipes for shared Start/Wait/pipe methods and only
+// implements Kill with pkexec fallback for privilege escalation.
 type realProcess struct {
 	*cmdWithPipes
-}
-
-func (p *realProcess) Start() error {
-	return p.cmd.Start()
-}
-
-func (p *realProcess) Wait() error {
-	return p.cmd.Wait()
 }
 
 // Kill terminates the process and all its children by killing the process group.
@@ -168,18 +188,6 @@ func isPkexecCancellation(err error) bool {
 	return false
 }
 
-func (p *realProcess) Stdin() io.WriteCloser {
-	return p.stdin
-}
-
-func (p *realProcess) Stdout() io.ReadCloser {
-	return p.stdout
-}
-
-func (p *realProcess) Stderr() io.ReadCloser {
-	return p.stderr
-}
-
 // DirectExecutor implements ProcessExecutor for privileged contexts.
 // Unlike RealExecutor, it runs commands directly without pkexec wrapper,
 // as it's intended for use by the helper daemon which already runs as root.
@@ -202,17 +210,10 @@ func (e *DirectExecutor) CreateProcess(ctx context.Context, name string, args ..
 }
 
 // directProcess wraps exec.Cmd for privileged execution contexts.
-// Unlike realProcess, it can kill processes directly without pkexec.
+// It embeds cmdWithPipes for shared Start/Wait/pipe methods and only
+// implements Kill with direct signaling (no pkexec needed since daemon runs as root).
 type directProcess struct {
 	*cmdWithPipes
-}
-
-func (p *directProcess) Start() error {
-	return p.cmd.Start()
-}
-
-func (p *directProcess) Wait() error {
-	return p.cmd.Wait()
 }
 
 // Kill terminates the process and all its children by killing the process group.
@@ -242,16 +243,4 @@ func (p *directProcess) Kill() error {
 	}
 
 	return nil
-}
-
-func (p *directProcess) Stdin() io.WriteCloser {
-	return p.stdin
-}
-
-func (p *directProcess) Stdout() io.ReadCloser {
-	return p.stdout
-}
-
-func (p *directProcess) Stderr() io.ReadCloser {
-	return p.stderr
 }

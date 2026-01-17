@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"time"
 )
 
 // ErrInterfaceNotFound is returned when the VPN interface cannot be detected.
@@ -59,4 +60,32 @@ func DetectVPNInterface(assignedIP string) (string, error) {
 // openfortivpn typically creates ppp* or tun* interfaces, though tap* is also possible.
 func isVPNInterface(name string) bool {
 	return strings.HasPrefix(name, "ppp") || strings.HasPrefix(name, "tun") || strings.HasPrefix(name, "tap")
+}
+
+// DetectInterfaceWithRetry attempts to detect the VPN interface by IP address
+// with exponential backoff retries. Returns the interface name or error after
+// all retries are exhausted.
+//
+// Default values: maxRetries=5, initialBackoff=100ms
+func DetectInterfaceWithRetry(assignedIP string, maxRetries int, initialBackoff time.Duration) (string, error) {
+	if maxRetries <= 0 {
+		maxRetries = 5
+	}
+	if initialBackoff <= 0 {
+		initialBackoff = 100 * time.Millisecond
+	}
+
+	backoff := initialBackoff
+	for i := 0; i < maxRetries; i++ {
+		ifaceName, err := DetectVPNInterface(assignedIP)
+		if err == nil {
+			return ifaceName, nil
+		}
+
+		// Wait before retry with exponential backoff.
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+
+	return "", ErrInterfaceNotFound
 }

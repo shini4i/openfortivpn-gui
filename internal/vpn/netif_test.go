@@ -2,6 +2,7 @@ package vpn
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -84,4 +85,36 @@ func TestIsVPNInterface_LongerNames(t *testing.T) {
 func TestErrInterfaceNotFound(t *testing.T) {
 	// Verify the error message
 	assert.Equal(t, "VPN interface not found", ErrInterfaceNotFound.Error())
+}
+
+func TestDetectInterfaceWithRetry_DefaultValues(t *testing.T) {
+	// Test that default values are used when 0 is passed
+	start := time.Now()
+	_, err := DetectInterfaceWithRetry("192.0.2.1", 0, 0)
+	elapsed := time.Since(start)
+
+	// Should use defaults: 5 retries with 100ms initial backoff
+	// Total wait time: 100 + 200 + 400 + 800 = 1500ms minimum
+	assert.Equal(t, ErrInterfaceNotFound, err)
+	assert.True(t, elapsed >= 1500*time.Millisecond, "should have used default retry count")
+}
+
+func TestDetectInterfaceWithRetry_SingleRetry(t *testing.T) {
+	start := time.Now()
+	_, err := DetectInterfaceWithRetry("192.0.2.1", 1, 10*time.Millisecond)
+	elapsed := time.Since(start)
+
+	// With 1 retry and 10ms backoff, should complete quickly
+	assert.Equal(t, ErrInterfaceNotFound, err)
+	assert.True(t, elapsed < 100*time.Millisecond, "single retry should be fast")
+}
+
+func TestDetectInterfaceWithRetry_InvalidIP(t *testing.T) {
+	_, err := DetectInterfaceWithRetry("not-an-ip", 1, 10*time.Millisecond)
+	assert.Equal(t, ErrInterfaceNotFound, err)
+}
+
+func TestDetectInterfaceWithRetry_EmptyIP(t *testing.T) {
+	_, err := DetectInterfaceWithRetry("", 1, 10*time.Millisecond)
+	assert.Equal(t, ErrInterfaceNotFound, err)
 }
