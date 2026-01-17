@@ -38,6 +38,7 @@ type HelperClient struct {
 	mu            sync.RWMutex
 	state         vpn.ConnectionState
 	assignedIP    string
+	interfaceName string
 	onStateChange func(old, new vpn.ConnectionState)
 	onOutput      func(line string)
 	onEvent       func(event *vpn.OutputEvent)
@@ -129,6 +130,36 @@ func (c *HelperClient) GetAssignedIP() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.assignedIP
+}
+
+// GetInterface returns the network interface name used by the VPN tunnel.
+func (c *HelperClient) GetInterface() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.interfaceName
+}
+
+// detectInterface attempts to detect the VPN interface by the assigned IP.
+// It retries with exponential backoff since the interface may take a moment to appear.
+func (c *HelperClient) detectInterface(assignedIP string) {
+	const maxRetries = 5
+	backoff := 100 * time.Millisecond
+
+	for i := 0; i < maxRetries; i++ {
+		ifaceName, err := vpn.DetectVPNInterface(assignedIP)
+		if err == nil {
+			c.mu.Lock()
+			c.interfaceName = ifaceName
+			c.mu.Unlock()
+			slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
+			return
+		}
+
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+
+	slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP)
 }
 
 // CanConnect returns true if a connection can be initiated.
@@ -368,6 +399,11 @@ func (c *HelperClient) handleEvent(event *protocol.Event) {
 		c.mu.Lock()
 		oldState := c.state
 		c.state = vpn.ConnectionState(data.To)
+		// Clear interface and IP on disconnect.
+		if vpn.ConnectionState(data.To) == vpn.StateDisconnected {
+			c.assignedIP = ""
+			c.interfaceName = ""
+		}
 		callback := c.onStateChange
 		c.mu.Unlock()
 
@@ -402,6 +438,8 @@ func (c *HelperClient) handleEvent(event *protocol.Event) {
 				c.mu.Lock()
 				c.assignedIP = ip
 				c.mu.Unlock()
+				// Detect the interface in background since it may take a moment to appear.
+				go c.detectInterface(ip)
 			}
 		}
 

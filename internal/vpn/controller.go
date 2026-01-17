@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
 )
@@ -27,9 +28,10 @@ type Controller struct {
 	executor         ProcessExecutor
 	directMode       bool // When true, run openfortivpn directly without pkexec
 
-	mu         sync.RWMutex
-	state      ConnectionState
-	assignedIP string
+	mu            sync.RWMutex
+	state         ConnectionState
+	assignedIP    string
+	interfaceName string
 
 	// Process management
 	process Process
@@ -156,6 +158,42 @@ func (c *Controller) setAssignedIP(ip string) {
 	c.assignedIP = ip
 }
 
+// GetInterface returns the network interface name used by the VPN tunnel.
+func (c *Controller) GetInterface() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.interfaceName
+}
+
+// setInterface sets the interface name.
+func (c *Controller) setInterface(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.interfaceName = name
+}
+
+// detectInterface attempts to detect the VPN interface by the assigned IP.
+// It retries with exponential backoff since the interface may take a moment to appear.
+func (c *Controller) detectInterface(assignedIP string) {
+	const maxRetries = 5
+	backoff := 100 * time.Millisecond
+
+	for i := 0; i < maxRetries; i++ {
+		ifaceName, err := DetectVPNInterface(assignedIP)
+		if err == nil {
+			c.setInterface(ifaceName)
+			slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
+			return
+		}
+
+		// Wait before retry.
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+
+	slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP)
+}
+
 // emitOutput sends a raw output line to the registered callback.
 func (c *Controller) emitOutput(line string) {
 	c.mu.RLock()
@@ -212,6 +250,7 @@ func (c *Controller) processOutput(line string) {
 
 	case EventDisconnected:
 		c.setAssignedIP("")
+		c.setInterface("")
 		if err := c.setState(StateDisconnected); err != nil {
 			c.emitError(fmt.Errorf("state transition failed: %w", err))
 		}
@@ -219,6 +258,8 @@ func (c *Controller) processOutput(line string) {
 	case EventGotIP:
 		if ip := event.GetData("ip"); ip != "" {
 			c.setAssignedIP(ip)
+			// Detect the interface in background since it may take a moment to appear.
+			go c.detectInterface(ip)
 		}
 
 	case EventError:
