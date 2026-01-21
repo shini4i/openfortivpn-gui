@@ -41,6 +41,50 @@
 
 ## Installation
 
+### NixOS (with binary cache for fast installs)
+
+```bash
+# One-time setup: enable the binary cache
+cachix use shini4i
+
+# Install
+nix profile install github:shini4i/nixpkgs#openfortivpn-gui
+```
+
+### Debian/Ubuntu
+
+Download the `.deb` package from [GitHub Releases](https://github.com/shini4i/openfortivpn-gui/releases) and install:
+
+```bash
+sudo apt install ./openfortivpn-gui_*.deb
+```
+
+### Fedora/RHEL
+
+Download the `.rpm` package from [GitHub Releases](https://github.com/shini4i/openfortivpn-gui/releases) and install:
+
+```bash
+sudo dnf install ./openfortivpn-gui-*.rpm
+```
+
+### Post-Installation Setup (deb/rpm only)
+
+To enable passwordless VPN operations with the helper daemon:
+
+1. Add your user to the group:
+
+   ```bash
+   sudo usermod -aG openfortivpn-gui $USER
+   ```
+
+2. Log out and back in (for group membership to take effect)
+
+3. Enable the helper service:
+
+   ```bash
+   sudo systemctl enable --now openfortivpn-gui-helper
+   ```
+
 ### Building from Source
 
 **Prerequisites:**
@@ -67,7 +111,7 @@ task run
 sudo apt install golang libgtk-4-dev libadwaita-1-dev pkg-config
 
 # Build
-go build -o openfortivpn-gui .
+go build -o openfortivpn-gui ./cmd/openfortivpn-gui
 
 # Run
 ./openfortivpn-gui
