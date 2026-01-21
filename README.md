@@ -18,131 +18,68 @@
 ## Features
 
 - **Multiple VPN Profiles** - Create, edit, and manage multiple VPN connection profiles
-- **Multiple Authentication Methods**:
-  - Username/Password
-  - One-Time Password (OTP)
-  - Client Certificate
-  - SAML/SSO (browser-based authentication)
+- **Multiple Authentication Methods**: Username/Password, OTP, Client Certificate, SAML/SSO
 - **System Tray Integration** - Minimize to tray, quick connect/disconnect
 - **Desktop Notifications** - Connection status notifications
-- **Secure Credential Storage** - Passwords stored in system keyring (GNOME Keyring/libsecret)
+- **Secure Credential Storage** - Passwords stored in system keyring (libsecret)
 - **Auto-Connect** - Optionally connect to last used profile on startup
-- **Configurable Routing Options**:
-  - DNS configuration (set-dns)
-  - Route management (set-routes)
-  - Half-internet routes (split tunneling with /1 routes)
-
-## Requirements
-
-- Linux with GTK4 and libadwaita
-- [openfortivpn](https://github.com/adrienverge/openfortivpn) installed
-- polkit (for privilege escalation via pkexec)
-- libsecret/GNOME Keyring (for secure credential storage)
+- **Configurable Routing** - DNS, routes, and split tunneling options
 
 ## Installation
 
-### NixOS (with binary cache for fast installs)
+### NixOS / Nix
+
+Add [shini4i/nixpkgs](https://github.com/shini4i/nixpkgs) as a flake input or install directly:
 
 ```bash
-# One-time setup: enable the binary cache
+# Enable binary cache for faster installs
 cachix use shini4i
 
 # Install
 nix profile install github:shini4i/nixpkgs#openfortivpn-gui
 ```
 
-### Debian/Ubuntu
+A NixOS module is also available for declarative configuration.
 
-Download the `.deb` package from [GitHub Releases](https://github.com/shini4i/openfortivpn-gui/releases) and install:
+### Fedora
 
-```bash
-sudo apt install ./openfortivpn-gui_*.deb
-```
-
-### Fedora/RHEL
-
-Download the `.rpm` package from [GitHub Releases](https://github.com/shini4i/openfortivpn-gui/releases) and install:
+Download the `.rpm` package from [GitHub Releases](https://github.com/shini4i/openfortivpn-gui/releases):
 
 ```bash
 sudo dnf install ./openfortivpn-gui-*.rpm
 ```
 
-### Post-Installation Setup (deb/rpm only)
+After installation, enable passwordless VPN operations:
 
-To enable passwordless VPN operations with the helper daemon:
+```bash
+sudo usermod -aG openfortivpn-gui $USER
+# Log out and back in, then:
+sudo systemctl enable --now openfortivpn-gui-helper
+```
 
-1. Add your user to the group:
+### Debian/Ubuntu
 
-   ```bash
-   sudo usermod -aG openfortivpn-gui $USER
-   ```
-
-2. Log out and back in (for group membership to take effect)
-
-3. Enable the helper service:
-
-   ```bash
-   sudo systemctl enable --now openfortivpn-gui-helper
-   ```
+> **Note:** Debian/Ubuntu packages are not available yet due to libadwaita version requirements (needs 1.7+). Packages will be provided once compatible versions reach Debian/Ubuntu repositories.
 
 ### Building from Source
 
-**Prerequisites:**
-- Go (see `go.mod` for version)
-- GTK4 development libraries
-- libadwaita development libraries
-- pkg-config
-
-**Using Nix (recommended):**
 ```bash
 # Enter development shell with all dependencies
 nix develop
 
-# Build
+# Build and run
 task build
-
-# Run
 task run
-```
-
-**Manual build:**
-```bash
-# Install dependencies (Debian/Ubuntu)
-sudo apt install golang libgtk-4-dev libadwaita-1-dev pkg-config
-
-# Build
-go build -o openfortivpn-gui ./cmd/openfortivpn-gui
-
-# Run
-./openfortivpn-gui
 ```
 
 ## Usage
 
-1. **Launch the application** - Run `openfortivpn-gui`
-2. **Create a profile** - Click the "+" button to add a new VPN profile
-3. **Configure the profile**:
-   - Enter VPN server hostname and port
-   - Select authentication method
-   - Configure routing options as needed
-4. **Connect** - Select a profile and click "Connect"
-5. **Authenticate** - Enter password when prompted (or complete SAML flow in browser)
+1. Launch `openfortivpn-gui`
+2. Click "+" to create a VPN profile
+3. Configure server, authentication method, and routing options
+4. Select a profile and click "Connect"
 
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `OPENFORTIVPN_GUI_DEBUG` | Set to `1` to enable debug logging |
-
-## Security
-
-- **Passwords are never stored in plaintext** - All credentials are stored in the system keyring
-- **Passwords are passed via stdin** - Never exposed in command-line arguments or process listings
-- **Profile validation** - Strict input validation prevents command injection
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues and pull requests.
+Set `OPENFORTIVPN_GUI_DEBUG=1` for debug logging.
 
 ## License
 
