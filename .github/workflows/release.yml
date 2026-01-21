@@ -70,7 +70,7 @@ jobs:
         uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
 
       - name: Update nixpkgs
-        uses: shini4i/nixpkgs-updater@18be0c5c1810d85a68b34517478c6c7dac825375 # v1.0.0
+        uses: shini4i/nixpkgs-updater@v1
         with:
           package-name: openfortivpn-gui
           version: ${{ github.ref_name }}
