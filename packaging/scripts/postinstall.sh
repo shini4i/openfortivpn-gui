@@ -2,8 +2,15 @@
 set -e
 
 # Create system group for socket access (if not exists)
+# Handle TOCTOU race: attempt creation, verify on failure
 if ! getent group openfortivpn-gui >/dev/null 2>&1; then
-    groupadd -r openfortivpn-gui
+    if ! groupadd -r openfortivpn-gui 2>/dev/null; then
+        # groupadd failed - check if another process created it
+        if ! getent group openfortivpn-gui >/dev/null 2>&1; then
+            echo "Error: Failed to create openfortivpn-gui group" >&2
+            exit 1
+        fi
+    fi
 fi
 
 # Reload systemd to pick up new service file

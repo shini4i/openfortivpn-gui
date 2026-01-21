@@ -56,8 +56,7 @@ nix profile install github:shini4i/nixpkgs#openfortivpn-gui
 Download the `.deb` package from [GitHub Releases](https://github.com/shini4i/openfortivpn-gui/releases) and install:
 
 ```bash
-sudo dpkg -i openfortivpn-gui_*.deb
-sudo apt-get install -f  # Install any missing dependencies
+sudo apt install ./openfortivpn-gui_*.deb
 ```
 
 ### Fedora/RHEL
@@ -73,11 +72,15 @@ sudo dnf install ./openfortivpn-gui-*.rpm
 To enable passwordless VPN operations with the helper daemon:
 
 1. Add your user to the group:
+
    ```bash
    sudo usermod -aG openfortivpn-gui $USER
    ```
+
 2. Log out and back in (for group membership to take effect)
+
 3. Enable the helper service:
+
    ```bash
    sudo systemctl enable --now openfortivpn-gui-helper
    ```
