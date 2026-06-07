@@ -12,18 +12,19 @@ type ProfileEditor struct {
 	widget *gtk.Box
 
 	// Form fields
-	nameRow         *adw.EntryRow
-	descriptionRow  *adw.EntryRow
-	hostRow         *adw.EntryRow
-	portRow         *adw.SpinRow
-	realmRow        *adw.EntryRow
-	usernameRow     *adw.EntryRow
-	authMethodRow   *adw.ComboRow
-	clientCertRow   *adw.EntryRow
-	clientKeyRow    *adw.EntryRow
-	trustedCertRow  *adw.EntryRow
-	setDNSRow       *adw.SwitchRow
-	setRoutesRow    *adw.SwitchRow
+	nameRow        *adw.EntryRow
+	descriptionRow *adw.EntryRow
+	hostRow        *adw.EntryRow
+	portRow        *adw.SpinRow
+	realmRow       *adw.EntryRow
+	usernameRow    *adw.EntryRow
+	authMethodRow  *adw.ComboRow
+	otpRow         *adw.SwitchRow
+	clientCertRow  *adw.EntryRow
+	clientKeyRow   *adw.EntryRow
+	trustedCertRow *adw.EntryRow
+	setDNSRow      *adw.SwitchRow
+	setRoutesRow   *adw.SwitchRow
 
 	// Certificate rows group (to show/hide)
 	certGroup *adw.PreferencesGroup
@@ -113,6 +114,14 @@ func (pe *ProfileEditor) setupWidget() {
 	})
 	authGroup.Add(pe.authMethodRow)
 
+	// Two-factor toggle. Only relevant for password authentication, where the
+	// server additionally requires a one-time token prompted at connect time.
+	pe.otpRow = adw.NewSwitchRow()
+	pe.otpRow.SetTitle("Require one-time password (2FA)")
+	pe.otpRow.SetSubtitle("Prompt for a 2FA token when connecting")
+	pe.otpRow.NotifyProperty("active", pe.markDirty)
+	authGroup.Add(pe.otpRow)
+
 	pe.usernameRow = adw.NewEntryRow()
 	pe.usernameRow.SetTitle("Username")
 	pe.usernameRow.ConnectChanged(pe.markDirty)
@@ -192,10 +201,49 @@ func (pe *ProfileEditor) setupWidget() {
 	pe.updateAuthMethodVisibility()
 }
 
+// authMethodToSelection maps a stored AuthMethod to the editor's controls:
+// the Method combo index and whether the 2FA (OTP) toggle is on.
+//
+// OTP is not a distinct method in the UI; it is password authentication with a
+// second factor, so it maps to the Password method index with the toggle on.
+// Unknown methods fall back to plain password to keep the editor usable.
+func authMethodToSelection(m profile.AuthMethod) (methodIndex uint, otpEnabled bool) {
+	switch m {
+	case profile.AuthMethodOTP:
+		return 0, true
+	case profile.AuthMethodCertificate:
+		return 1, false
+	case profile.AuthMethodSAML:
+		return 2, false
+	default: // AuthMethodPassword and any unknown value
+		return 0, false
+	}
+}
+
+// selectionToAuthMethod maps the editor's Method combo index and 2FA toggle
+// state back to a stored AuthMethod. The toggle is only meaningful for the
+// Password method; for certificate/SAML it is ignored.
+func selectionToAuthMethod(methodIndex uint, otpEnabled bool) profile.AuthMethod {
+	switch methodIndex {
+	case 0: // Password method; the 2FA toggle promotes it to OTP
+		if otpEnabled {
+			return profile.AuthMethodOTP
+		}
+		return profile.AuthMethodPassword
+	case 1:
+		return profile.AuthMethodCertificate
+	case 2:
+		return profile.AuthMethodSAML
+	default: // unexpected index: fall back to plain password
+		return profile.AuthMethodPassword
+	}
+}
+
 // updateAuthMethodVisibility shows/hides fields based on auth method.
 // Index 0 = Password, 1 = Certificate, 2 = SAML/SSO
 func (pe *ProfileEditor) updateAuthMethodVisibility() {
 	selected := pe.authMethodRow.Selected()
+	isPasswordAuth := selected == 0
 	isCertAuth := selected == 1
 	isSAMLAuth := selected == 2
 
@@ -203,6 +251,8 @@ func (pe *ProfileEditor) updateAuthMethodVisibility() {
 	pe.certGroup.SetVisible(isCertAuth)
 	// Username for password auth only (SAML doesn't need it upfront)
 	pe.usernameRow.SetVisible(!isCertAuth && !isSAMLAuth)
+	// 2FA is a modifier on password auth only
+	pe.otpRow.SetVisible(isPasswordAuth)
 }
 
 // markDirty is called when any field value changes.
@@ -256,15 +306,11 @@ func (pe *ProfileEditor) SetProfile(p *profile.Profile) {
 	pe.realmRow.SetText(p.Realm)
 	pe.usernameRow.SetText(p.Username)
 
-	// Auth method: 0 = Password, 1 = Certificate, 2 = SAML
-	switch p.AuthMethod {
-	case profile.AuthMethodCertificate:
-		pe.authMethodRow.SetSelected(1)
-	case profile.AuthMethodSAML:
-		pe.authMethodRow.SetSelected(2)
-	default:
-		pe.authMethodRow.SetSelected(0)
-	}
+	// Auth method: 0 = Password, 1 = Certificate, 2 = SAML. OTP loads as the
+	// Password method with the 2FA toggle on.
+	methodIndex, otpEnabled := authMethodToSelection(p.AuthMethod)
+	pe.authMethodRow.SetSelected(methodIndex)
+	pe.otpRow.SetActive(otpEnabled)
 
 	// Certificate fields
 	pe.clientCertRow.SetText(p.ClientCertPath)
@@ -297,15 +343,9 @@ func (pe *ProfileEditor) GetProfile() *profile.Profile {
 	p.Realm = pe.realmRow.Text()
 	p.Username = pe.usernameRow.Text()
 
-	// Auth method: 0 = Password, 1 = Certificate, 2 = SAML
-	switch pe.authMethodRow.Selected() {
-	case 1:
-		p.AuthMethod = profile.AuthMethodCertificate
-	case 2:
-		p.AuthMethod = profile.AuthMethodSAML
-	default:
-		p.AuthMethod = profile.AuthMethodPassword
-	}
+	// Auth method: 0 = Password, 1 = Certificate, 2 = SAML. The 2FA toggle
+	// promotes the Password method to OTP.
+	p.AuthMethod = selectionToAuthMethod(pe.authMethodRow.Selected(), pe.otpRow.Active())
 
 	// Certificate fields
 	p.ClientCertPath = pe.clientCertRow.Text()
@@ -328,6 +368,7 @@ func (pe *ProfileEditor) clearFields() {
 	pe.realmRow.SetText("")
 	pe.usernameRow.SetText("")
 	pe.authMethodRow.SetSelected(0)
+	pe.otpRow.SetActive(false)
 	pe.clientCertRow.SetText("")
 	pe.clientKeyRow.SetText("")
 	pe.trustedCertRow.SetText("")
@@ -344,6 +385,7 @@ func (pe *ProfileEditor) setFieldsEnabled(enabled bool) {
 	pe.realmRow.SetSensitive(enabled)
 	pe.usernameRow.SetSensitive(enabled)
 	pe.authMethodRow.SetSensitive(enabled)
+	pe.otpRow.SetSensitive(enabled)
 	pe.clientCertRow.SetSensitive(enabled)
 	pe.clientKeyRow.SetSensitive(enabled)
 	pe.trustedCertRow.SetSensitive(enabled)
@@ -370,7 +412,6 @@ func (pe *ProfileEditor) MarkNewProfile() {
 func (pe *ProfileEditor) Widget() gtk.Widgetter {
 	return pe.widget
 }
-
 
 // ClearSelection clears text selection in all entry rows to prevent visual highlighting.
 func (pe *ProfileEditor) ClearSelection() {
