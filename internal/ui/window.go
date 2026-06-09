@@ -568,8 +568,23 @@ func (w *MainWindow) connect() {
 	w.doConnect(currentProfile, &vpn.ConnectOptions{Password: password})
 }
 
+// ensureWindowVisible presents the main window so that modal dialogs have a
+// mapped parent to attach to.
+//
+// In tray-only mode the window is created lazily but never shown. adw.Dialog
+// (and adw.AlertDialog) attaches to its parent window's surface, so presenting
+// a dialog on a hidden window displays nothing. Without this, an interactive
+// connect from the tray — e.g. a 2FA profile that needs an OTP, or any profile
+// without a cached password — would silently do nothing.
+func (w *MainWindow) ensureWindowVisible() {
+	w.window.SetVisible(true)
+	w.window.Present()
+}
+
 // showPasswordDialog shows a dialog to enter the password.
 func (w *MainWindow) showPasswordDialog(p *profile.Profile) {
+	w.ensureWindowVisible()
+
 	dialog := adw.NewAlertDialog("Enter Password", "")
 	dialog.SetBody("Enter the password for " + p.Name)
 
@@ -607,6 +622,8 @@ func (w *MainWindow) showPasswordDialog(p *profile.Profile) {
 
 // showOTPDialog shows a dialog to enter the one-time password for 2FA.
 func (w *MainWindow) showOTPDialog(p *profile.Profile, password string) {
+	w.ensureWindowVisible()
+
 	ShowOTPDialog(w.window, func(otp string, cancelled bool) {
 		if !cancelled && otp != "" {
 			w.doConnect(p, &vpn.ConnectOptions{
