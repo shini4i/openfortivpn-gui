@@ -38,10 +38,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
 
       - name: Install Nix
-        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
@@ -50,7 +50,7 @@ jobs:
       # CGO compilation (GTK bindings) is expensive - this is the main optimization
       - name: Cache Go artifacts
         id: go-cache
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             /home/runner/go/pkg/mod
@@ -75,10 +75,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
 
       - name: Install Nix
-        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
@@ -87,7 +87,7 @@ jobs:
       # CGO compilation (GTK bindings) is expensive - this is the main optimization
       - name: Cache Go artifacts
         id: go-cache
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             /home/runner/go/pkg/mod
@@ -100,7 +100,7 @@ jobs:
         run: nix develop --command go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5.5.2
+        uses: codecov/codecov-action@e53489f4d376d79066609109e7a95a29eb3740b1 # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.out

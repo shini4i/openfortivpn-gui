@@ -59,7 +59,21 @@ sudo systemctl enable --now openfortivpn-gui-helper
 
 ### Debian/Ubuntu
 
-> **Note:** Debian/Ubuntu packages are not available yet due to libadwaita version requirements (needs 1.7+). Packages will be provided once compatible versions reach Debian/Ubuntu repositories.
+> **Note:** Requires libadwaita 1.7+, available on Debian 13 (Trixie) and later, and Ubuntu 25.04 and later. Older releases (e.g. Ubuntu 24.04 LTS) ship an incompatible libadwaita and are not supported.
+
+Download the `.deb` package from [GitHub Releases](https://github.com/shini4i/openfortivpn-gui/releases):
+
+```bash
+sudo apt install ./openfortivpn-gui_*.deb
+```
+
+After installation, enable passwordless VPN operations:
+
+```bash
+sudo usermod -aG openfortivpn-gui $USER
+# Log out and back in, then:
+sudo systemctl enable --now openfortivpn-gui-helper
+```
 
 ### Building from Source
 
