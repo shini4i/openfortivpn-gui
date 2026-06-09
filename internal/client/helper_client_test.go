@@ -4,8 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
-	"path/filepath"
+	"os"
 	"testing"
 	"time"
 
@@ -26,12 +27,18 @@ type fakeDaemon struct {
 	connectArgs chan protocol.ConnectParams
 }
 
-// startFakeDaemon launches a fake helper daemon on a temporary unix socket and
-// returns it. The listener is closed automatically when the test finishes.
+// startFakeDaemon launches a fake helper daemon on a unix socket and returns
+// it. The listener is closed automatically when the test finishes.
+//
+// It binds to a Linux abstract-namespace socket (the "@" prefix) rather than a
+// filesystem path: t.TempDir() under a long $TMPDIR (e.g. CI runners) can push
+// the socket path past the kernel's ~108-byte sun_path limit, which fails with
+// "bind: invalid argument". Abstract sockets carry no filesystem path and need
+// no cleanup. The transport (NDJSON over a unix conn) is identical either way.
 func startFakeDaemon(t *testing.T) *fakeDaemon {
 	t.Helper()
 
-	path := filepath.Join(t.TempDir(), "helper.sock")
+	path := fmt.Sprintf("@openfortivpn-gui-test-%d.sock", os.Getpid())
 	ln, err := net.Listen("unix", path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
