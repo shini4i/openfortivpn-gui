@@ -217,8 +217,192 @@ func TestController_ProcessOutput_Error(t *testing.T) {
 	assert.Equal(t, StateFailed, ctrl.GetState())
 }
 
-func TestController_BuildCommand(t *testing.T) {
+// TestController_BuildCommandArgs asserts the exact openfortivpn argument
+// vector for each supported profile/options shape. Each expected slice is
+// derived directly from buildCommandArgs in its emission order, so full-slice
+// equality validates ordering, flag/value pairing (e.g. "-u" adjacent to the
+// username), and completeness — catching accidental, duplicated, or contradictory
+// flags that a presence-only check (assert.Contains) would miss.
+//
+// Note: the password is intentionally absent from every expected slice — it is
+// delivered via stdin, not argv (see TestController_Connect_OTP_DeliversPasswordAndOTP
+// and TestController_Connect_PasswordWrittenToStdin).
+func TestController_BuildCommandArgs(t *testing.T) {
 	ctrl := NewController("/usr/bin/openfortivpn")
+
+	const (
+		host = "vpn.example.com"
+		port = 443
+	)
+
+	tests := []struct {
+		name string
+		p    *profile.Profile
+		opts *ConnectOptions
+		want []string
+	}{
+		{
+			name: "password auth with realm, dns and routes enabled",
+			p: &profile.Profile{
+				Host: host, Port: port, Username: "testuser",
+				AuthMethod: profile.AuthMethodPassword,
+				Realm:      "testrealm",
+				SetDNS:     true, SetRoutes: true,
+			},
+			want: []string{
+				"vpn.example.com:443",
+				"-u", "testuser",
+				"--realm=testrealm",
+				"--set-dns=1",
+				"--set-routes=1",
+				"--half-internet-routes=0",
+			},
+		},
+		{
+			name: "password auth with dns and routes disabled",
+			p: &profile.Profile{
+				Host: host, Port: port, Username: "testuser",
+				AuthMethod: profile.AuthMethodPassword,
+				SetDNS:     false, SetRoutes: false,
+			},
+			want: []string{
+				"vpn.example.com:443",
+				"-u", "testuser",
+				"--set-dns=0",
+				"--set-routes=0",
+				"--half-internet-routes=0",
+			},
+		},
+		{
+			name: "password auth with half-internet-routes enabled",
+			p: &profile.Profile{
+				Host: host, Port: port, Username: "testuser",
+				AuthMethod: profile.AuthMethodPassword,
+				SetDNS:     true, SetRoutes: true, HalfInternetRoutes: true,
+			},
+			want: []string{
+				"vpn.example.com:443",
+				"-u", "testuser",
+				"--set-dns=1",
+				"--set-routes=1",
+				"--half-internet-routes=1",
+			},
+		},
+		{
+			name: "password auth without username omits -u",
+			p: &profile.Profile{
+				Host: host, Port: port,
+				AuthMethod: profile.AuthMethodPassword,
+				SetDNS:     true, SetRoutes: true,
+			},
+			want: []string{
+				"vpn.example.com:443",
+				"--set-dns=1",
+				"--set-routes=1",
+				"--half-internet-routes=0",
+			},
+		},
+		{
+			name: "otp auth passes --otp flag and keeps username",
+			p: &profile.Profile{
+				Host: host, Port: port, Username: "testuser",
+				AuthMethod: profile.AuthMethodOTP,
+				SetDNS:     true, SetRoutes: true,
+			},
+			opts: &ConnectOptions{Password: "password", OTP: "123456"},
+			want: []string{
+				"vpn.example.com:443",
+				"-u", "testuser",
+				"--otp=123456",
+				"--set-dns=1",
+				"--set-routes=1",
+				"--half-internet-routes=0",
+			},
+		},
+		{
+			name: "otp auth without otp value omits --otp flag",
+			p: &profile.Profile{
+				Host: host, Port: port, Username: "testuser",
+				AuthMethod: profile.AuthMethodOTP,
+				SetDNS:     true, SetRoutes: true,
+			},
+			opts: nil,
+			want: []string{
+				"vpn.example.com:443",
+				"-u", "testuser",
+				"--set-dns=1",
+				"--set-routes=1",
+				"--half-internet-routes=0",
+			},
+		},
+		{
+			name: "certificate auth passes user-cert and user-key, no -u",
+			p: &profile.Profile{
+				Host: host, Port: port,
+				AuthMethod:     profile.AuthMethodCertificate,
+				ClientCertPath: "/path/to/cert.pem",
+				ClientKeyPath:  "/path/to/key.pem",
+				SetDNS:         true, SetRoutes: true,
+			},
+			want: []string{
+				"vpn.example.com:443",
+				"--set-dns=1",
+				"--set-routes=1",
+				"--half-internet-routes=0",
+				"--user-cert=/path/to/cert.pem",
+				"--user-key=/path/to/key.pem",
+			},
+		},
+		{
+			name: "saml auth passes --saml-login, no -u",
+			p: &profile.Profile{
+				Host: host, Port: port,
+				AuthMethod: profile.AuthMethodSAML,
+				SetDNS:     true, SetRoutes: true,
+			},
+			want: []string{
+				"vpn.example.com:443",
+				"--set-dns=1",
+				"--set-routes=1",
+				"--half-internet-routes=0",
+				"--saml-login",
+			},
+		},
+		{
+			name: "trusted cert appends --trusted-cert",
+			p: &profile.Profile{
+				Host: host, Port: port, Username: "testuser",
+				AuthMethod:  profile.AuthMethodPassword,
+				TrustedCert: "abc123def456",
+				SetDNS:      true, SetRoutes: true,
+			},
+			want: []string{
+				"vpn.example.com:443",
+				"-u", "testuser",
+				"--set-dns=1",
+				"--set-routes=1",
+				"--half-internet-routes=0",
+				"--trusted-cert=abc123def456",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ctrl.buildCommandArgs(tt.p, tt.opts)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestController_Connect_OTP_DeliversPasswordAndOTP verifies that a single 2FA
+// connection delivers BOTH credentials by their respective channels: the
+// one-time password as the --otp command-line flag, and the account password
+// via stdin (never argv). This is the end-to-end guarantee that a 2FA connect
+// passes everything openfortivpn needs.
+func TestController_Connect_OTP_DeliversPasswordAndOTP(t *testing.T) {
+	executor := NewMockExecutor()
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
 
 	p := &profile.Profile{
 		ID:         "550e8400-e29b-41d4-a716-446655440000",
@@ -226,185 +410,31 @@ func TestController_BuildCommand(t *testing.T) {
 		Host:       "vpn.example.com",
 		Port:       443,
 		Username:   "testuser",
-		AuthMethod: profile.AuthMethodPassword,
-		SetDNS:     true,
-		SetRoutes:  true,
-		Realm:      "testrealm",
-	}
-
-	args := ctrl.buildCommandArgs(p, nil)
-
-	assert.Contains(t, args, "vpn.example.com:443")
-	assert.Contains(t, args, "-u")
-	assert.Contains(t, args, "testuser")
-	assert.Contains(t, args, "--realm=testrealm")
-	assert.Contains(t, args, "--set-dns=1")
-	assert.Contains(t, args, "--set-routes=1")
-}
-
-func TestController_BuildCommand_NoDNS(t *testing.T) {
-	ctrl := NewController("/usr/bin/openfortivpn")
-
-	p := &profile.Profile{
-		ID:         "550e8400-e29b-41d4-a716-446655440000",
-		Name:       "Test VPN",
-		Host:       "vpn.example.com",
-		Port:       443,
-		Username:   "testuser",
-		AuthMethod: profile.AuthMethodPassword,
-		SetDNS:     false,
-		SetRoutes:  false,
-	}
-
-	args := ctrl.buildCommandArgs(p, nil)
-
-	assert.Contains(t, args, "--set-dns=0")
-	assert.Contains(t, args, "--set-routes=0")
-	assert.Contains(t, args, "--half-internet-routes=0")
-}
-
-func TestController_BuildCommand_HalfInternetRoutes(t *testing.T) {
-	ctrl := NewController("/usr/bin/openfortivpn")
-
-	p := &profile.Profile{
-		ID:                 "550e8400-e29b-41d4-a716-446655440000",
-		Name:               "Test VPN",
-		Host:               "vpn.example.com",
-		Port:               443,
-		Username:           "testuser",
-		AuthMethod:         profile.AuthMethodPassword,
-		SetDNS:             true,
-		SetRoutes:          true,
-		HalfInternetRoutes: true,
-	}
-
-	args := ctrl.buildCommandArgs(p, nil)
-
-	assert.Contains(t, args, "--set-routes=1")
-	assert.Contains(t, args, "--half-internet-routes=1")
-}
-
-func TestController_BuildCommand_Certificate(t *testing.T) {
-	ctrl := NewController("/usr/bin/openfortivpn")
-
-	p := &profile.Profile{
-		ID:             "550e8400-e29b-41d4-a716-446655440000",
-		Name:           "Test VPN",
-		Host:           "vpn.example.com",
-		Port:           443,
-		AuthMethod:     profile.AuthMethodCertificate,
-		ClientCertPath: "/path/to/cert.pem",
-		ClientKeyPath:  "/path/to/key.pem",
-		SetDNS:         true,
-		SetRoutes:      true,
-	}
-
-	args := ctrl.buildCommandArgs(p, nil)
-
-	assert.Contains(t, args, "--user-cert=/path/to/cert.pem")
-	assert.Contains(t, args, "--user-key=/path/to/key.pem")
-}
-
-func TestController_BuildCommand_TrustedCert(t *testing.T) {
-	ctrl := NewController("/usr/bin/openfortivpn")
-
-	p := &profile.Profile{
-		ID:          "550e8400-e29b-41d4-a716-446655440000",
-		Name:        "Test VPN",
-		Host:        "vpn.example.com",
-		Port:        443,
-		Username:    "testuser",
-		AuthMethod:  profile.AuthMethodPassword,
-		TrustedCert: "abc123def456",
-		SetDNS:      true,
-		SetRoutes:   true,
-	}
-
-	args := ctrl.buildCommandArgs(p, nil)
-
-	assert.Contains(t, args, "--trusted-cert=abc123def456")
-}
-
-func TestController_BuildCommand_SAML(t *testing.T) {
-	ctrl := NewController("/usr/bin/openfortivpn")
-
-	p := &profile.Profile{
-		ID:         "550e8400-e29b-41d4-a716-446655440000",
-		Name:       "Test VPN",
-		Host:       "vpn.example.com",
-		Port:       443,
-		AuthMethod: profile.AuthMethodSAML,
-		SetDNS:     true,
-		SetRoutes:  true,
-	}
-
-	args := ctrl.buildCommandArgs(p, nil)
-
-	// SAML auth should include --saml-login flag
-	assert.Contains(t, args, "--saml-login")
-	// SAML auth should NOT include username
-	assert.NotContains(t, args, "-u")
-}
-
-func TestController_BuildCommandArgs_OTP(t *testing.T) {
-	ctrl := NewController("/usr/bin/openfortivpn")
-
-	p := &profile.Profile{
-		ID:         "550e8400-e29b-41d4-a716-446655440000",
-		Name:       "Test VPN",
-		Host:       "vpn.example.com",
-		Port:       443,
 		AuthMethod: profile.AuthMethodOTP,
-		Username:   "testuser",
 		SetDNS:     true,
 		SetRoutes:  true,
 	}
 
-	// Test with OTP provided
-	opts := &ConnectOptions{
-		Password: "password",
+	err := ctrl.Connect(context.Background(), p, &ConnectOptions{
+		Password: "topsecret",
 		OTP:      "123456",
-	}
-	args := ctrl.buildCommandArgs(p, opts)
+	})
+	require.NoError(t, err)
 
-	// OTP auth should include username
-	assert.Contains(t, args, "-u")
-	assert.Contains(t, args, "testuser")
+	// OTP is delivered as a command-line flag.
+	args := executor.GetLastArgs()
+	assert.Contains(t, args, "--otp=123456", "OTP must be passed via the --otp flag")
 
-	// OTP should be passed via --otp flag
-	assert.Contains(t, args, "--otp=123456")
-}
-
-func TestController_BuildCommandArgs_OTP_Empty(t *testing.T) {
-	ctrl := NewController("/usr/bin/openfortivpn")
-
-	p := &profile.Profile{
-		ID:         "550e8400-e29b-41d4-a716-446655440000",
-		Name:       "Test VPN",
-		Host:       "vpn.example.com",
-		Port:       443,
-		AuthMethod: profile.AuthMethodOTP,
-		Username:   "testuser",
-		SetDNS:     true,
-		SetRoutes:  true,
-	}
-
-	// Test with no OTP (nil opts)
-	args := ctrl.buildCommandArgs(p, nil)
-
-	// Should NOT include --otp flag when OTP is empty
+	// Password is delivered via stdin and must NEVER appear in argv.
 	for _, arg := range args {
-		assert.NotContains(t, arg, "--otp=")
+		assert.NotContains(t, arg, "topsecret", "password must never appear in command-line arguments")
 	}
+	assert.Eventually(t, func() bool {
+		return executor.GetProcess().GetStdinContent() == "topsecret\n"
+	}, 100*time.Millisecond, 10*time.Millisecond, "password must be written to stdin")
 
-	// Test with empty OTP string
-	opts := &ConnectOptions{Password: "password", OTP: ""}
-	args = ctrl.buildCommandArgs(p, opts)
-
-	// Should still NOT include --otp flag
-	for _, arg := range args {
-		assert.NotContains(t, arg, "--otp=")
-	}
+	// Cleanup
+	executor.GetProcess().CompleteProcess()
 }
 
 func TestController_Connect_SAML_NoPasswordWritten(t *testing.T) {
