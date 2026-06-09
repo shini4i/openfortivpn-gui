@@ -63,12 +63,18 @@ type MainWindow struct {
 
 	// Callbacks
 	onProfileConnecting func(profileID string)
+
+	// scheduleOnMain marshals a function onto the GTK main thread. It defaults
+	// to glib.IdleAdd and is injectable so tests can run handlers synchronously
+	// without a running GTK main loop.
+	scheduleOnMain func(func())
 }
 
 // NewMainWindow creates a new main window instance.
 func NewMainWindow(app *adw.Application, deps *MainWindowDeps) *MainWindow {
 	w := &MainWindow{
-		deps: deps,
+		deps:           deps,
+		scheduleOnMain: func(fn func()) { glib.IdleAdd(fn) },
 	}
 
 	w.setupWindow(app)
@@ -258,7 +264,32 @@ func (w *MainWindow) setupCallbacks() {
 	})
 
 	// VPN state change callback
-	w.deps.VPNController.OnStateChange(func(oldState, newState vpn.ConnectionState) {
+	w.deps.VPNController.OnStateChange(w.handleStateChange)
+
+	// VPN output callback - send logs to dialog.
+	// AppendLog self-marshals via glib.IdleAdd, so no extra marshaling is
+	// needed here even though this fires on the controller's background
+	// goroutine.
+	w.deps.VPNController.OnOutput(func(line string) {
+		w.logDialog.AppendLog(line)
+	})
+
+	// VPN error callback
+	w.deps.VPNController.OnError(w.handleError)
+
+	// VPN event callback for IP assignment and SAML authentication
+	w.deps.VPNController.OnEvent(w.handleEvent)
+}
+
+// handleStateChange responds to VPN connection state transitions.
+//
+// State changes are delivered on the controller's output-processing goroutine,
+// not the GTK main thread. GTK and the systray/D-Bus stack are not
+// thread-safe, so touching them from a background goroutine corrupts their
+// state and crashes the process with a SIGSEGV. All work is therefore marshaled
+// onto the main thread via scheduleOnMain.
+func (w *MainWindow) handleStateChange(oldState, newState vpn.ConnectionState) {
+	w.scheduleOnMain(func() {
 		// Reset reconnect state on successful connection
 		if newState == vpn.StateConnected && w.deps.ReconnectManager != nil {
 			w.deps.ReconnectManager.OnConnectionSucceeded()
@@ -271,7 +302,7 @@ func (w *MainWindow) setupCallbacks() {
 			displayState = vpn.StateReconnecting
 		}
 
-		// Update UI on main thread
+		// Update status display
 		w.statusDisplay.SetState(displayState)
 
 		// Update connect button state
@@ -319,19 +350,26 @@ func (w *MainWindow) setupCallbacks() {
 			w.stopStatsCollector()
 		}
 	})
+}
 
-	// VPN output callback - send logs to dialog
-	w.deps.VPNController.OnOutput(func(line string) {
-		w.logDialog.AppendLog(line)
-	})
-
-	// VPN error callback
-	w.deps.VPNController.OnError(func(err error) {
+// handleError reports a VPN error to the user.
+//
+// Errors are emitted on the controller's output-processing goroutine.
+// showError constructs and presents a GTK dialog, which is not thread-safe, so
+// the work is marshaled onto the main thread via scheduleOnMain.
+func (w *MainWindow) handleError(err error) {
+	w.scheduleOnMain(func() {
 		w.showError("VPN Error", err.Error())
 	})
+}
 
-	// VPN event callback for IP assignment and SAML authentication
-	w.deps.VPNController.OnEvent(func(event *vpn.OutputEvent) {
+// handleEvent reacts to parsed VPN output events (IP assignment, SAML auth).
+//
+// Events are emitted on the controller's output-processing goroutine and may
+// touch GTK (e.g. opening a browser or showing an error dialog for SAML
+// authentication), so the work is marshaled onto the main thread.
+func (w *MainWindow) handleEvent(event *vpn.OutputEvent) {
+	w.scheduleOnMain(func() {
 		switch event.Type {
 		case vpn.EventGotIP:
 			if ip := event.GetData("ip"); ip != "" {
@@ -624,30 +662,32 @@ func (w *MainWindow) updateStatusForProfile(p *profile.Profile) {
 }
 
 // updateConnectButton updates the connect button based on VPN state.
+//
+// The caller (handleStateChange) already runs on the GTK main thread, so the
+// button is mutated directly to keep it in sync with the rest of the
+// state-change update rather than deferring it to a separate idle cycle.
 func (w *MainWindow) updateConnectButton(state vpn.ConnectionState) {
-	glib.IdleAdd(func() {
-		if w.connectButton == nil {
-			return
-		}
+	if w.connectButton == nil {
+		return
+	}
 
-		switch {
-		case state.CanDisconnect():
-			// Connected or connecting - show Disconnect
-			w.connectButton.SetLabel("Disconnect")
-			w.connectButton.RemoveCSSClass("suggested-action")
-			w.connectButton.AddCSSClass("destructive-action")
-			w.connectButton.SetSensitive(true)
-		case state.CanConnect():
-			// Disconnected or failed - show Connect
-			w.connectButton.SetLabel("Connect")
-			w.connectButton.RemoveCSSClass("destructive-action")
-			w.connectButton.AddCSSClass("suggested-action")
-			w.connectButton.SetSensitive(true)
-		default:
-			// Unknown state - disable button
-			w.connectButton.SetSensitive(false)
-		}
-	})
+	switch {
+	case state.CanDisconnect():
+		// Connected or connecting - show Disconnect
+		w.connectButton.SetLabel("Disconnect")
+		w.connectButton.RemoveCSSClass("suggested-action")
+		w.connectButton.AddCSSClass("destructive-action")
+		w.connectButton.SetSensitive(true)
+	case state.CanConnect():
+		// Disconnected or failed - show Connect
+		w.connectButton.SetLabel("Connect")
+		w.connectButton.RemoveCSSClass("destructive-action")
+		w.connectButton.AddCSSClass("suggested-action")
+		w.connectButton.SetSensitive(true)
+	default:
+		// Unknown state - disable button
+		w.connectButton.SetSensitive(false)
+	}
 }
 
 // showError displays an error dialog.
