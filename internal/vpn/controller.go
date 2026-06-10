@@ -622,16 +622,22 @@ func (c *Controller) Disconnect(ctx context.Context) error {
 	process := c.process
 	c.mu.Unlock()
 
-	// Cancel context to signal termination
-	if cancel != nil {
-		cancel()
-	}
-
-	// Kill process if still running
+	// Kill the process FIRST so it gets the graceful SIGTERM->grace->SIGKILL
+	// escalation (see Process.Kill). The process is launched with
+	// exec.CommandContext, so cancelling the context SIGKILLs it immediately;
+	// doing that before Kill would defeat the grace window and prevent
+	// openfortivpn from tearing the tunnel down cleanly.
 	if process != nil {
 		if err := process.Kill(); err != nil {
 			return fmt.Errorf("failed to kill VPN process: %w", err)
 		}
+	}
+
+	// Now cancel the context to release process resources and unblock any
+	// goroutine waiting on it. The process is already gone, so the
+	// context-driven kill is a harmless no-op.
+	if cancel != nil {
+		cancel()
 	}
 
 	return nil

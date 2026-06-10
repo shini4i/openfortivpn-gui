@@ -3,6 +3,7 @@ package vpn
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -1075,4 +1076,58 @@ func TestController_ProcessCompletion_AutoDisconnect(t *testing.T) {
 	assert.Eventually(t, func() bool {
 		return ctrl.GetState() == StateDisconnected
 	}, 100*time.Millisecond, 10*time.Millisecond)
+}
+
+// TestController_Disconnect_GracefulBeforeContextCancel verifies that Disconnect
+// delivers the graceful SIGTERM (and its grace window) BEFORE cancelling the
+// process context.
+//
+// The process is launched with exec.CommandContext, so cancelling the context
+// SIGKILLs the child. If cancel() ran before the graceful Kill(), an
+// openfortivpn that needs a moment to tear the tunnel down cleanly would be
+// SIGKILLed mid-shutdown, defeating the SIGTERM->grace->SIGKILL escalation this
+// code implements.
+//
+// The child traps SIGTERM, sleeps briefly, then exits 42. Observing exit code
+// 42 proves the trap ran to completion — i.e. SIGTERM was honored and no
+// context-driven SIGKILL interrupted it. The sleep widens the window so the
+// old cancel()-first ordering would reliably SIGKILL the child instead.
+func TestController_Disconnect_GracefulBeforeContextCancel(t *testing.T) {
+	oldGrace := sigtermGracePeriod
+	sigtermGracePeriod = 2 * time.Second
+	defer func() { sigtermGracePeriod = oldGrace }()
+
+	c := NewController("unused", WithDirectMode())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	proc, err := NewDirectExecutor().CreateProcess(ctx, "sh", "-c",
+		`trap 'sleep 0.3; exit 42' TERM; while true; do sleep 0.05; done`)
+	require.NoError(t, err)
+	require.NoError(t, proc.Start())
+
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- proc.Wait() }()
+
+	// Let the shell install its SIGTERM trap before we signal it.
+	time.Sleep(200 * time.Millisecond)
+
+	// Wire the live process into the controller as if Connect had started it.
+	c.mu.Lock()
+	c.state = StateConnected
+	c.process = proc
+	c.ctx = ctx
+	c.cancel = cancel
+	c.mu.Unlock()
+
+	require.NoError(t, c.Disconnect(context.Background()))
+
+	select {
+	case err := <-waitErr:
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr, "process should exit via its SIGTERM trap, not SIGKILL")
+		assert.Equal(t, 42, exitErr.ExitCode(),
+			"SIGTERM must reach the process and its trap run to completion before the context is cancelled")
+	case <-time.After(5 * time.Second):
+		t.Fatal("process did not exit after Disconnect")
+	}
 }
