@@ -125,24 +125,21 @@ func ValidAuthMethods() []AuthMethod {
 
 // validateHost validates that the host is a safe hostname or IP address.
 // This prevents command injection and other security issues.
+//
+// Security model: this is a strict ALLOWLIST. A host is either a parseable IP
+// address or an RFC 1123 hostname whose labels contain only [A-Za-z0-9-].
+// Every shell metacharacter, quote, or whitespace byte is rejected by the
+// per-label character check below, so no separate blacklist is needed.
 func validateHost(host string) error {
 	// Check for empty host
 	if host == "" {
 		return errors.New("host is required")
 	}
 
-	// Check for control characters, null bytes, and other dangerous characters
+	// Check for control characters and null bytes up front for a clearer error
 	for _, r := range host {
 		if r < 32 || r == 127 { // Control characters
 			return errors.New("invalid host: contains control characters")
-		}
-	}
-
-	// Check for shell metacharacters and other dangerous characters
-	dangerousChars := []string{";", "|", "&", "$", "`", "(", ")", "{", "}", "[", "]", "<", ">", "\\", "'", "\"", "\n", "\r", "\t", " "}
-	for _, char := range dangerousChars {
-		if strings.Contains(host, char) {
-			return fmt.Errorf("invalid host: contains forbidden character %q", char)
 		}
 	}
 

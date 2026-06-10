@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -200,7 +201,7 @@ func TestProfile_Validate(t *testing.T) {
 				AuthMethod: AuthMethodPassword,
 				Username:   "john.doe",
 			},
-			wantErr: "invalid host: contains forbidden character",
+			wantErr: "invalid host: invalid character",
 		},
 		{
 			name: "invalid host - contains pipe",
@@ -212,7 +213,7 @@ func TestProfile_Validate(t *testing.T) {
 				AuthMethod: AuthMethodPassword,
 				Username:   "john.doe",
 			},
-			wantErr: "invalid host: contains forbidden character",
+			wantErr: "invalid host: invalid character",
 		},
 		{
 			name: "invalid host - contains newline",
@@ -248,7 +249,7 @@ func TestProfile_Validate(t *testing.T) {
 				AuthMethod: AuthMethodPassword,
 				Username:   "john.doe",
 			},
-			wantErr: "invalid host: contains forbidden character",
+			wantErr: "invalid host: invalid character",
 		},
 		{
 			name: "invalid host - control character",
@@ -396,6 +397,29 @@ func TestProfile_Validate(t *testing.T) {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
 			}
+		})
+	}
+}
+
+// TestProfile_Validate_HostRejectsShellMetacharacters pins down that the
+// RFC 1123 allowlist rejects every shell metacharacter the former
+// dangerousChars blacklist covered, so removing the blacklist cannot
+// silently weaken host validation in a future refactor.
+func TestProfile_Validate_HostRejectsShellMetacharacters(t *testing.T) {
+	for _, char := range []string{";", "|", "&", "$", "`", "(", ")", "{", "}", "[", "]", "<", ">", `\`, "'", `"`, " "} {
+		t.Run(fmt.Sprintf("rejects %q", char), func(t *testing.T) {
+			p := &Profile{
+				ID:         "550e8400-e29b-41d4-a716-446655440000",
+				Name:       "Work VPN",
+				Host:       "vpn" + char + "evil.com",
+				Port:       443,
+				AuthMethod: AuthMethodPassword,
+				Username:   "john.doe",
+			}
+
+			err := p.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid host: invalid character")
 		})
 	}
 }

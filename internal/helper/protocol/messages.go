@@ -123,14 +123,6 @@ type ConnectParams struct {
 	HalfInternetRoutes bool `json:"half_internet_routes"`
 }
 
-// DisconnectParams contains parameters for the disconnect command.
-// Currently empty but defined for future extensibility.
-type DisconnectParams struct{}
-
-// StatusParams contains parameters for the status command.
-// Currently empty but defined for future extensibility.
-type StatusParams struct{}
-
 // StatusResult contains the result of a status query.
 type StatusResult struct {
 	// State is the current connection state.
@@ -172,7 +164,7 @@ type ErrorData struct {
 }
 
 // NewRequest creates a new request with the given command and parameters.
-func NewRequest(id string, cmd Command, params interface{}) (*Request, error) {
+func NewRequest(id string, cmd Command, params any) (*Request, error) {
 	paramsJSON, err := json.Marshal(params)
 	if err != nil {
 		return nil, err
@@ -186,7 +178,7 @@ func NewRequest(id string, cmd Command, params interface{}) (*Request, error) {
 }
 
 // NewSuccessResponse creates a successful response.
-func NewSuccessResponse(id string, result interface{}) (*Response, error) {
+func NewSuccessResponse(id string, result any) (*Response, error) {
 	var resultJSON json.RawMessage
 	if result != nil {
 		var err error
@@ -217,7 +209,7 @@ func NewErrorResponse(id string, code string, message string) *Response {
 }
 
 // NewEvent creates a new event with the given name and data.
-func NewEvent(name EventName, data interface{}) (*Event, error) {
+func NewEvent(name EventName, data any) (*Event, error) {
 	dataJSON, err := json.Marshal(data)
 	if err != nil {
 		return nil, err

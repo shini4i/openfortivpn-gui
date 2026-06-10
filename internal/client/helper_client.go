@@ -210,7 +210,7 @@ func (c *HelperClient) Disconnect(ctx context.Context) error {
 		defer cancel()
 	}
 
-	_, err := c.sendRequest(ctx, protocol.CommandDisconnect, protocol.DisconnectParams{})
+	_, err := c.sendRequest(ctx, protocol.CommandDisconnect, struct{}{})
 	return err
 }
 
@@ -246,7 +246,7 @@ func (c *HelperClient) syncState() error {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
 	defer cancel()
 
-	resp, err := c.sendRequest(ctx, protocol.CommandStatus, protocol.StatusParams{})
+	resp, err := c.sendRequest(ctx, protocol.CommandStatus, struct{}{})
 	if err != nil {
 		return err
 	}
@@ -270,7 +270,7 @@ func (c *HelperClient) syncState() error {
 	return nil
 }
 
-func (c *HelperClient) sendRequest(ctx context.Context, cmd protocol.Command, params interface{}) (*protocol.Response, error) {
+func (c *HelperClient) sendRequest(ctx context.Context, cmd protocol.Command, params any) (*protocol.Response, error) {
 	id := uuid.New().String()
 
 	req, err := protocol.NewRequest(id, cmd, params)
@@ -388,11 +388,16 @@ func (c *HelperClient) handleResponse(resp *protocol.Response) {
 	ch, ok := c.pending[resp.ID]
 	c.pendingMu.Unlock()
 
-	if ok {
-		select {
-		case ch <- resp:
-		default:
-		}
+	if !ok {
+		// The waiter timed out or the helper sent a duplicate/unsolicited ID.
+		slog.Warn("Dropping response with no pending request", "id", resp.ID)
+		return
+	}
+
+	select {
+	case ch <- resp:
+	default:
+		slog.Warn("Dropping duplicate response for pending request", "id", resp.ID)
 	}
 }
 

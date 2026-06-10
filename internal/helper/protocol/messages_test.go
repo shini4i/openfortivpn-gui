@@ -36,14 +36,14 @@ func TestNewRequest(t *testing.T) {
 			name:    "create disconnect request with empty params",
 			id:      "req-002",
 			cmd:     CommandDisconnect,
-			params:  DisconnectParams{},
+			params:  struct{}{},
 			wantErr: false,
 		},
 		{
 			name:    "create status request with empty params",
 			id:      "req-003",
 			cmd:     CommandStatus,
-			params:  StatusParams{},
+			params:  struct{}{},
 			wantErr: false,
 		},
 		{

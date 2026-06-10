@@ -415,7 +415,7 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-func (c *Client) sendJSON(v interface{}) error {
+func (c *Client) sendJSON(v any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

@@ -45,6 +45,14 @@ type ProfileEditor struct {
 	onSave func(p *profile.Profile)
 }
 
+// Method combo indices in the profile editor. Mirrors the StringList order
+// in setupWidget: 0 = Password, 1 = Certificate, 2 = SAML/SSO.
+const (
+	methodIndexPassword    uint = 0
+	methodIndexCertificate uint = 1
+	methodIndexSAML        uint = 2
+)
+
 // NewProfileEditor creates a new profile editor widget.
 func NewProfileEditor() *ProfileEditor {
 	pe := &ProfileEditor{}
@@ -226,13 +234,13 @@ func (pe *ProfileEditor) setupWidget() {
 func authMethodToSelection(m profile.AuthMethod) (methodIndex uint, otpEnabled bool) {
 	switch m {
 	case profile.AuthMethodOTP:
-		return 0, true
+		return methodIndexPassword, true
 	case profile.AuthMethodCertificate:
-		return 1, false
+		return methodIndexCertificate, false
 	case profile.AuthMethodSAML:
-		return 2, false
+		return methodIndexSAML, false
 	default: // AuthMethodPassword and any unknown value
-		return 0, false
+		return methodIndexPassword, false
 	}
 }
 
@@ -241,14 +249,14 @@ func authMethodToSelection(m profile.AuthMethod) (methodIndex uint, otpEnabled b
 // Password method; for certificate/SAML it is ignored.
 func selectionToAuthMethod(methodIndex uint, otpEnabled bool) profile.AuthMethod {
 	switch methodIndex {
-	case 0: // Password method; the 2FA toggle promotes it to OTP
+	case methodIndexPassword: // the 2FA toggle promotes Password to OTP
 		if otpEnabled {
 			return profile.AuthMethodOTP
 		}
 		return profile.AuthMethodPassword
-	case 1:
+	case methodIndexCertificate:
 		return profile.AuthMethodCertificate
-	case 2:
+	case methodIndexSAML:
 		return profile.AuthMethodSAML
 	default: // unexpected index: fall back to plain password
 		return profile.AuthMethodPassword
@@ -256,12 +264,11 @@ func selectionToAuthMethod(methodIndex uint, otpEnabled bool) profile.AuthMethod
 }
 
 // updateAuthMethodVisibility shows/hides fields based on auth method.
-// Index 0 = Password, 1 = Certificate, 2 = SAML/SSO
 func (pe *ProfileEditor) updateAuthMethodVisibility() {
 	selected := pe.authMethodRow.Selected()
-	isPasswordAuth := selected == 0
-	isCertAuth := selected == 1
-	isSAMLAuth := selected == 2
+	isPasswordAuth := selected == methodIndexPassword
+	isCertAuth := selected == methodIndexCertificate
+	isSAMLAuth := selected == methodIndexSAML
 
 	// Certificate fields only for cert auth
 	pe.certGroup.SetVisible(isCertAuth)
@@ -424,7 +431,7 @@ func (pe *ProfileEditor) clearFields() {
 	pe.portRow.SetValue(443)
 	pe.realmRow.SetText("")
 	pe.usernameRow.SetText("")
-	pe.authMethodRow.SetSelected(0)
+	pe.authMethodRow.SetSelected(methodIndexPassword)
 	pe.otpRow.SetActive(false)
 	pe.clientCertRow.SetText("")
 	pe.clientKeyRow.SetText("")

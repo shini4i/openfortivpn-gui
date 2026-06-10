@@ -9,14 +9,6 @@ import (
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
 )
 
-// Method combo indices in the profile editor. Mirrors the StringList order
-// in setupWidget: 0 = Password, 1 = Certificate, 2 = SAML/SSO.
-const (
-	methodIndexPassword    uint = 0
-	methodIndexCertificate uint = 1
-	methodIndexSAML        uint = 2
-)
-
 func TestAuthMethodToSelection(t *testing.T) {
 	tests := []struct {
 		name      string
