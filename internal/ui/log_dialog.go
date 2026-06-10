@@ -10,7 +10,22 @@ import (
 
 const (
 	logDialogMaxLines = 500
+	// logDialogTrimChunk is the overshoot allowed before trimming back to
+	// logDialogMaxLines. Trimming requires a full text-buffer rebuild, so it
+	// runs once per chunk of appended lines instead of once per line.
+	logDialogTrimChunk = 100
 )
+
+// appendLogLine appends line to lines and trims the oldest entries back to
+// max once the slice overshoots max+chunk. Returns the updated slice and
+// whether a trim occurred (the caller must then rebuild its display buffer).
+func appendLogLine(lines []string, line string, max, chunk int) ([]string, bool) {
+	lines = append(lines, line)
+	if len(lines) < max+chunk {
+		return lines, false
+	}
+	return lines[len(lines)-max:], true
+}
 
 // LogDialog displays VPN connection logs in a separate window.
 type LogDialog struct {
@@ -73,18 +88,23 @@ func (ld *LogDialog) setupDialog() {
 	ld.dialog.SetChild(toolbarView)
 }
 
-// AppendLog adds a line to the log.
+// AppendLog adds a line to the log. The common case inserts only the new
+// line at the end of the buffer; a full rebuild happens only when the
+// retention limit trims old lines (once per logDialogTrimChunk appends).
 func (ld *LogDialog) AppendLog(line string) {
 	glib.IdleAdd(func() {
-		ld.logLines = append(ld.logLines, line)
+		var trimmed bool
+		ld.logLines, trimmed = appendLogLine(ld.logLines, line, logDialogMaxLines, logDialogTrimChunk)
 
-		// Trim if too many lines
-		if len(ld.logLines) > logDialogMaxLines {
-			ld.logLines = ld.logLines[len(ld.logLines)-logDialogMaxLines:]
+		if trimmed {
+			ld.logBuffer.SetText(strings.Join(ld.logLines, "\n"))
+		} else {
+			end := ld.logBuffer.EndIter()
+			if ld.logBuffer.CharCount() > 0 {
+				ld.logBuffer.Insert(end, "\n")
+			}
+			ld.logBuffer.Insert(end, line)
 		}
-
-		// Update buffer
-		ld.logBuffer.SetText(strings.Join(ld.logLines, "\n"))
 
 		// Scroll to end
 		end := ld.logBuffer.EndIter()

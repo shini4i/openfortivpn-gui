@@ -66,6 +66,29 @@ nfpms:
     contents: *contents
     scripts: *scripts
 
+# SBOMs for everything a user can install: archives and the deb/rpm packages.
+# Generated with syft (installed in the release workflow).
+sboms:
+  - id: archives
+    artifacts: archive
+  - id: packages
+    artifacts: package
+
+# Keyless cosign signature over the checksum file: one signature covers every
+# released artifact via its checksum. The .sigstore.json bundle embeds the
+# certificate; verify with:
+#   cosign verify-blob --bundle checksums.txt.sigstore.json checksums.txt
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - "sign-blob"
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
 changelog:
   use: github-native
 

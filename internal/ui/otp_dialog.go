@@ -7,9 +7,10 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
-// otpPattern matches valid OTP codes (4-8 digits).
-// Most authenticators produce 6-digit codes, but some systems use 4 or 8.
-var otpPattern = regexp.MustCompile(`^\d{4,8}$`)
+// otpPattern matches valid OTP codes: 4-16 alphanumeric characters.
+// Most authenticators produce 6-digit codes, but FortiToken hardware and SMS
+// tokens can be longer and alphanumeric.
+var otpPattern = regexp.MustCompile(`^[A-Za-z0-9]{4,16}$`)
 
 // OTPDialogResult represents the result of the OTP dialog.
 type OTPDialogResult struct {
@@ -32,7 +33,7 @@ type OTPDialog struct {
 }
 
 // isValidOTP checks if the given string is a valid OTP code.
-// Valid OTPs are 4-8 digit numeric strings.
+// Valid OTPs are 4-16 alphanumeric characters.
 func isValidOTP(otp string) bool {
 	return otpPattern.MatchString(otp)
 }
@@ -52,7 +53,8 @@ func (od *OTPDialog) setupDialog() {
 	// Create OTP entry
 	od.otpEntry = adw.NewEntryRow()
 	od.otpEntry.SetTitle("One-Time Password")
-	od.otpEntry.SetInputPurpose(gtk.InputPurposeNumber)
+	// Free-form input: tokens may be alphanumeric, not just digits.
+	od.otpEntry.SetInputPurpose(gtk.InputPurposeFreeForm)
 
 	// Wrap in preferences group for proper styling
 	group := adw.NewPreferencesGroup()
@@ -80,11 +82,11 @@ func (od *OTPDialog) setupDialog() {
 
 		if !result.Cancelled {
 			otp := od.otpEntry.Text()
-			// Validate OTP format (4-8 digits)
+			// Validate OTP format (4-16 alphanumeric characters)
 			if !isValidOTP(otp) {
 				// Show error styling and keep dialog open
 				od.otpEntry.AddCSSClass("error")
-				od.dialog.SetBody("Invalid OTP. Please enter 4-8 digits.")
+				od.dialog.SetBody("Invalid OTP. Please enter 4-16 letters or digits.")
 				return
 			}
 			result.OTP = otp
@@ -104,11 +106,11 @@ func (od *OTPDialog) setupDialog() {
 		}
 
 		otp := od.otpEntry.Text()
-		// Validate OTP format (4-8 digits)
+		// Validate OTP format (4-16 alphanumeric characters)
 		if !isValidOTP(otp) {
 			// Show error styling and keep dialog open
 			od.otpEntry.AddCSSClass("error")
-			od.dialog.SetBody("Invalid OTP. Please enter 4-8 digits.")
+			od.dialog.SetBody("Invalid OTP. Please enter 4-16 letters or digits.")
 			return
 		}
 

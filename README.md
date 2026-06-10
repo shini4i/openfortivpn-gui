@@ -76,6 +76,18 @@ sudo usermod -aG openfortivpn-gui $USER
 sudo systemctl enable --now openfortivpn-gui-helper
 ```
 
+### Verifying Releases
+
+Releases ship SBOMs and a keyless [cosign](https://docs.sigstore.dev/cosign/installation/) signature over the checksum file:
+
+```bash
+cosign verify-blob \
+  --bundle openfortivpn-gui_<version>_checksums.txt.sigstore.json \
+  --certificate-identity-regexp 'https://github.com/shini4i/openfortivpn-gui' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  openfortivpn-gui_<version>_checksums.txt
+```
+
 ### Building from Source
 
 ```bash
@@ -94,7 +106,7 @@ task run
 3. Configure server, authentication method, and routing options
 4. Select a profile and click "Connect"
 
-Set `OPENFORTIVPN_GUI_DEBUG=1` for debug logging.
+Set `OPENFORTIVPN_GUI_DEBUG=1` for debug logging (the helper daemon also accepts a `-debug` flag).
 
 ## License
 

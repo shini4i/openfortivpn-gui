@@ -35,6 +35,8 @@ func main() {
 	socketPath := flag.String("socket", server.DefaultSocketPath, "Path to the UNIX socket")
 	openfortivpnPath := flag.String("openfortivpn", defaultOpenfortivpnPath, "Path to openfortivpn binary")
 	showVersion := flag.Bool("version", false, "Show version and exit")
+	debug := flag.Bool("debug", os.Getenv("OPENFORTIVPN_GUI_DEBUG") == "1",
+		"Enable debug logging (also enabled via OPENFORTIVPN_GUI_DEBUG=1)")
 	flag.Parse()
 
 	if *showVersion {
@@ -43,8 +45,12 @@ func main() {
 	}
 
 	// Configure structured logging
+	logLevel := slog.LevelInfo
+	if *debug {
+		logLevel = slog.LevelDebug
+	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: logLevel,
 	})))
 
 	slog.Info("Starting openfortivpn-gui-helper", "version", version)
