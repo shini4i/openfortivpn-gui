@@ -20,6 +20,7 @@
             gobject-introspection
             golangci-lint
             gosec
+            govulncheck
           ];
 
           buildInputs = with pkgs; [
