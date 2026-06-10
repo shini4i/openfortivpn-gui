@@ -196,11 +196,14 @@ func (m *Manager) handleConnect(req *protocol.Request, clientID string) *protoco
 // systems). The resolved path is then re-checked to catch a harmless-looking
 // path that resolves INTO a sensitive location via symlinks.
 //
-// Returning the resolved path closes the TOCTOU window that existed when the
-// ORIGINAL path was passed to openfortivpn (running as root): an attacker
-// could swap a validated path for a symlink to a sensitive file between
-// validation and open. With the resolved path, the object that was validated
-// is the object that gets opened.
+// Returning the resolved path collapses the symlink-swap vector for the
+// validated path: an attacker can no longer have us validate a benign symlink
+// and let openfortivpn (running as root) follow it to a sensitive target after
+// the check. It does NOT eliminate the generic open-time TOCTOU that exists
+// for any privileged process opening a user-supplied path — a directory
+// component on the resolved path could still be swapped between resolution and
+// open. The residual risk is bounded by the sensitive-prefix policy above and
+// by the fact that cert/key contents are never echoed back to the client.
 //
 // For paths that don't exist yet, symlinks can't be resolved; the cleaned
 // path is returned so openfortivpn reports the missing file itself.
