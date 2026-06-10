@@ -360,8 +360,10 @@ func (c *Controller) buildCommandArgs(p *profile.Profile, opts *ConnectOptions) 
 }
 
 // Connect initiates a VPN connection using the given profile and options.
-// The command is run via pkexec for privilege escalation since openfortivpn
-// requires root privileges to create network interfaces.
+// openfortivpn requires root privileges to create network interfaces: in
+// non-direct mode the command is run via pkexec for privilege escalation,
+// while in direct mode (the helper daemon, already running as root) it is run
+// directly. See startProcess.
 //
 // SECURITY: Password and OTP are passed via stdin, NOT command-line
 // arguments. Command-line arguments are visible to all users via /proc or
@@ -622,22 +624,23 @@ func (c *Controller) Disconnect(ctx context.Context) error {
 	process := c.process
 	c.mu.Unlock()
 
-	// Kill the process FIRST so it gets the graceful SIGTERM->grace->SIGKILL
-	// escalation (see Process.Kill). The process is launched with
-	// exec.CommandContext, so cancelling the context SIGKILLs it immediately;
-	// doing that before Kill would defeat the grace window and prevent
-	// openfortivpn from tearing the tunnel down cleanly.
+	// Cancel the context on every return path so its resources are always
+	// released and any goroutine waiting on it unblocks — including the early
+	// return below when Kill fails. Deferring runs it AFTER Kill: cancelling
+	// first would SIGKILL the child immediately (the process is launched with
+	// exec.CommandContext), defeating the graceful SIGTERM->grace->SIGKILL
+	// escalation and preventing openfortivpn from tearing the tunnel down
+	// cleanly. By the time cancel runs the process is already gone, so the
+	// context-driven kill is a harmless no-op.
+	if cancel != nil {
+		defer cancel()
+	}
+
+	// Kill the process first so it gets the graceful escalation (see Process.Kill).
 	if process != nil {
 		if err := process.Kill(); err != nil {
 			return fmt.Errorf("failed to kill VPN process: %w", err)
 		}
-	}
-
-	// Now cancel the context to release process resources and unblock any
-	// goroutine waiting on it. The process is already gone, so the
-	// context-driven kill is a harmless no-op.
-	if cancel != nil {
-		cancel()
 	}
 
 	return nil

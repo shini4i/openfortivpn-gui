@@ -1043,11 +1043,25 @@ func TestController_Disconnect_KillError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StateConnecting, ctrl.GetState())
 
+	// Wrap the real cancel func in a spy so we can assert the context is
+	// released even when Kill fails. Regression guard: Disconnect cancels via
+	// a deferred call so the early return on Kill error still runs it; dropping
+	// that would leak the context and the goroutines that hold it.
+	var cancelCalled bool
+	ctrl.mu.Lock()
+	realCancel := ctrl.cancel
+	ctrl.cancel = func() {
+		cancelCalled = true
+		realCancel()
+	}
+	ctrl.mu.Unlock()
+
 	// Now try to disconnect - should return the Kill error
 	err = ctrl.Disconnect(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to kill VPN process")
 	assert.Contains(t, err.Error(), "authentication cancelled")
+	assert.True(t, cancelCalled, "cancel must run even when Kill fails, to release the context")
 }
 
 func TestController_ProcessCompletion_AutoDisconnect(t *testing.T) {
