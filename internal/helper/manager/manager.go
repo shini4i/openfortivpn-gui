@@ -186,9 +186,15 @@ func (m *Manager) handleConnect(req *protocol.Request, clientID string) *protoco
 // the VPN client and returns the symlink-resolved path the caller MUST use.
 // It defends against:
 //   - Path traversal to sensitive locations (".." segments are normalized by
-//     Clean/EvalSymlinks and the result is checked against the sensitive list)
+//     Clean and the cleaned path is checked against the sensitive list)
 //   - Non-absolute paths
 //   - Symlink-based attacks pointing to sensitive system files
+//
+// The sensitive-path policy is enforced lexically on the cleaned path before
+// any filesystem access, so the rejection holds even when the target cannot
+// be stat'd (e.g. files under /root unreadable even to root on hardened
+// systems). The resolved path is then re-checked to catch a harmless-looking
+// path that resolves INTO a sensitive location via symlinks.
 //
 // Returning the resolved path closes the TOCTOU window that existed when the
 // ORIGINAL path was passed to openfortivpn (running as root): an attacker
@@ -197,8 +203,7 @@ func (m *Manager) handleConnect(req *protocol.Request, clientID string) *protoco
 // is the object that gets opened.
 //
 // For paths that don't exist yet, symlinks can't be resolved; the cleaned
-// path is checked lexically against the sensitive list and returned so
-// openfortivpn reports the missing file itself.
+// path is returned so openfortivpn reports the missing file itself.
 func validateAndResolveFilePath(path string) (string, error) {
 	if path == "" {
 		return "", nil // Empty paths are allowed (optional fields)
@@ -211,21 +216,30 @@ func validateAndResolveFilePath(path string) (string, error) {
 
 	cleanPath := filepath.Clean(path)
 
+	// Lexical policy check FIRST, before any filesystem access. A path that
+	// already points into a sensitive prefix must be rejected regardless of
+	// whether the helper can stat it. The helper runs as root and could stat
+	// most targets, but files like those under /root or /etc/shadow may be
+	// unreadable even to root on hardened systems; relying on a successful
+	// Lstat to reach the policy check would let "permission denied" mask the
+	// rejection and surface a confusing error instead of the policy one.
+	if isSensitivePath(cleanPath) {
+		return "", fmt.Errorf("access to sensitive system path not allowed")
+	}
+
 	realPath, err := resolvePathSafely(cleanPath)
 	if err != nil {
-		// If the file doesn't exist, we can't resolve symlinks.
-		// Enforce the sensitive-path policy on the cleaned path and let
-		// openfortivpn handle the missing-file error.
+		// If the file doesn't exist, we can't resolve symlinks. The lexical
+		// check above already cleared the cleaned path, so hand it back and
+		// let openfortivpn report the missing-file error.
 		if os.IsNotExist(err) {
-			if isSensitivePath(cleanPath) {
-				return "", fmt.Errorf("access to sensitive system path not allowed")
-			}
 			return cleanPath, nil
 		}
 		return "", fmt.Errorf("failed to resolve path: %w", err)
 	}
 
-	// Check if resolved path points to sensitive locations
+	// Symlink defense: a path that looks harmless lexically may resolve INTO
+	// a sensitive location. Re-check the resolved target.
 	if isSensitivePath(realPath) {
 		return "", fmt.Errorf("access to sensitive system path not allowed")
 	}
