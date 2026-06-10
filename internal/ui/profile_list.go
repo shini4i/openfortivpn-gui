@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
 )
