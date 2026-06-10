@@ -130,6 +130,7 @@ func notifySystemd(state string) {
 		socketPath = "\x00" + socketPath[1:]
 	}
 
+	// #nosec G704 -- not SSRF: "unixgram" dials a local Unix datagram socket, not a network endpoint, and socketPath is NOTIFY_SOCKET supplied by systemd (the trusted supervisor that launched this helper)
 	conn, err := net.Dial("unixgram", socketPath)
 	if err != nil {
 		slog.Warn("Failed to connect to notify socket", "error", err)

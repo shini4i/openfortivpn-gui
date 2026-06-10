@@ -95,6 +95,7 @@ func (p *cmdWithPipes) Stderr() io.ReadCloser {
 // newCmdWithPipes creates a command with stdin/stdout/stderr pipes configured.
 // The process is started in its own process group to allow killing all child processes.
 func newCmdWithPipes(ctx context.Context, name string, args ...string) (*cmdWithPipes, error) {
+	// #nosec G204 -- name is the operator-configured openfortivpn binary path, not runtime user input; args are validated profile fields and exec.CommandContext runs no shell, so there is no injection surface
 	cmd := exec.CommandContext(ctx, name, args...)
 
 	// Start process in its own process group so we can kill all children
