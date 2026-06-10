@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -59,6 +60,149 @@ func TestSelectionToAuthMethod(t *testing.T) {
 			got := selectionToAuthMethod(tt.index, tt.otpEnabled)
 			assert.Equal(t, tt.want, got)
 		})
+	}
+}
+
+// TestApplyFormValues_PreservesAndOverwritesAllFields verifies that
+// applyFormValues produces a profile where every editor-controlled field comes
+// from the form and nothing from the stored profile is lost.
+//
+// Regression test for the field-loss bug: GetProfile used to construct a fresh
+// Profile{} and copy only editor-backed fields, silently zeroing AutoReconnect
+// and HalfInternetRoutes on every save (NewProfile defaults AutoReconnect to
+// true, so the first save killed auto-reconnect for every profile).
+func TestApplyFormValues_PreservesAndOverwritesAllFields(t *testing.T) {
+	current := &profile.Profile{
+		ID:                 "0d6db4a4-6d27-4626-a047-87a05a91c218",
+		Name:               "old-name",
+		Description:        "old-desc",
+		Host:               "old.example.com",
+		Port:               443,
+		AuthMethod:         profile.AuthMethodPassword,
+		Username:           "old-user",
+		Realm:              "old-realm",
+		TrustedCert:        "old-cert-hash",
+		ClientCertPath:     "/old/cert.pem",
+		ClientKeyPath:      "/old/key.pem",
+		SetDNS:             false,
+		SetRoutes:          false,
+		HalfInternetRoutes: true,
+		AutoReconnect:      true,
+	}
+
+	form := editorFormValues{
+		Name:               "new-name",
+		Description:        "new-desc",
+		Host:               "new.example.com",
+		Port:               10443,
+		Realm:              "new-realm",
+		Username:           "new-user",
+		MethodIndex:        methodIndexPassword,
+		OTPEnabled:         true,
+		ClientCertPath:     "/new/cert.pem",
+		ClientKeyPath:      "/new/key.pem",
+		TrustedCert:        "new-cert-hash",
+		SetDNS:             true,
+		SetRoutes:          true,
+		HalfInternetRoutes: false,
+		AutoReconnect:      false,
+	}
+
+	got := applyFormValues(current, form)
+
+	want := &profile.Profile{
+		ID:                 current.ID, // identity is never editor-controlled
+		Name:               "new-name",
+		Description:        "new-desc",
+		Host:               "new.example.com",
+		Port:               10443,
+		AuthMethod:         profile.AuthMethodOTP, // password method + 2FA toggle
+		Username:           "new-user",
+		Realm:              "new-realm",
+		TrustedCert:        "new-cert-hash",
+		ClientCertPath:     "/new/cert.pem",
+		ClientKeyPath:      "/new/key.pem",
+		SetDNS:             true,
+		SetRoutes:          true,
+		HalfInternetRoutes: false,
+		AutoReconnect:      false,
+	}
+	assert.Equal(t, want, got, "every field must be either editor-controlled or preserved from the stored profile")
+}
+
+// TestApplyFormValues_DoesNotMutateCurrent verifies the stored profile is left
+// untouched: applyFormValues must return a copy so a later Cancel/reselect
+// still sees the on-disk values.
+func TestApplyFormValues_DoesNotMutateCurrent(t *testing.T) {
+	current := &profile.Profile{
+		ID:            "0d6db4a4-6d27-4626-a047-87a05a91c218",
+		Name:          "original",
+		AutoReconnect: true,
+	}
+	snapshot := *current
+
+	_ = applyFormValues(current, editorFormValues{Name: "changed", AutoReconnect: false})
+
+	assert.Equal(t, snapshot, *current, "applyFormValues must not mutate the input profile")
+}
+
+// TestApplyFormValues_RoundTripPreservesProfile verifies that loading a profile
+// into form values and applying them back yields an identical profile — opening
+// the editor and saving without touching anything must be a no-op.
+func TestApplyFormValues_RoundTripPreservesProfile(t *testing.T) {
+	methods := []profile.AuthMethod{
+		profile.AuthMethodPassword,
+		profile.AuthMethodOTP,
+		profile.AuthMethodCertificate,
+		profile.AuthMethodSAML,
+	}
+
+	// Exercise both boolean polarities so a round-trip that only works when
+	// the flags happen to be true cannot slip through.
+	for _, flags := range []bool{true, false} {
+		for _, m := range methods {
+			t.Run(fmt.Sprintf("%s/flags=%t", m, flags), func(t *testing.T) {
+				current := &profile.Profile{
+					ID:                 "0d6db4a4-6d27-4626-a047-87a05a91c218",
+					Name:               "vpn",
+					Description:        "desc",
+					Host:               "vpn.example.com",
+					Port:               443,
+					AuthMethod:         m,
+					Username:           "user",
+					Realm:              "realm",
+					TrustedCert:        "hash",
+					ClientCertPath:     "/cert.pem",
+					ClientKeyPath:      "/key.pem",
+					SetDNS:             flags,
+					SetRoutes:          flags,
+					HalfInternetRoutes: flags,
+					AutoReconnect:      flags,
+				}
+
+				index, otp := authMethodToSelection(m)
+				form := editorFormValues{
+					Name:               current.Name,
+					Description:        current.Description,
+					Host:               current.Host,
+					Port:               current.Port,
+					Realm:              current.Realm,
+					Username:           current.Username,
+					MethodIndex:        index,
+					OTPEnabled:         otp,
+					ClientCertPath:     current.ClientCertPath,
+					ClientKeyPath:      current.ClientKeyPath,
+					TrustedCert:        current.TrustedCert,
+					SetDNS:             current.SetDNS,
+					SetRoutes:          current.SetRoutes,
+					HalfInternetRoutes: current.HalfInternetRoutes,
+					AutoReconnect:      current.AutoReconnect,
+				}
+
+				assert.Equal(t, current, applyFormValues(current, form),
+					"save-without-edits must not change the profile")
+			})
+		}
 	}
 }
 

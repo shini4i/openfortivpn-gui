@@ -12,19 +12,21 @@ type ProfileEditor struct {
 	widget *gtk.Box
 
 	// Form fields
-	nameRow        *adw.EntryRow
-	descriptionRow *adw.EntryRow
-	hostRow        *adw.EntryRow
-	portRow        *adw.SpinRow
-	realmRow       *adw.EntryRow
-	usernameRow    *adw.EntryRow
-	authMethodRow  *adw.ComboRow
-	otpRow         *adw.SwitchRow
-	clientCertRow  *adw.EntryRow
-	clientKeyRow   *adw.EntryRow
-	trustedCertRow *adw.EntryRow
-	setDNSRow      *adw.SwitchRow
-	setRoutesRow   *adw.SwitchRow
+	nameRow          *adw.EntryRow
+	descriptionRow   *adw.EntryRow
+	hostRow          *adw.EntryRow
+	portRow          *adw.SpinRow
+	realmRow         *adw.EntryRow
+	usernameRow      *adw.EntryRow
+	authMethodRow    *adw.ComboRow
+	otpRow           *adw.SwitchRow
+	clientCertRow    *adw.EntryRow
+	clientKeyRow     *adw.EntryRow
+	trustedCertRow   *adw.EntryRow
+	setDNSRow        *adw.SwitchRow
+	setRoutesRow     *adw.SwitchRow
+	halfInternetRow  *adw.SwitchRow
+	autoReconnectRow *adw.SwitchRow
 
 	// Certificate rows group (to show/hide)
 	certGroup *adw.PreferencesGroup
@@ -173,6 +175,20 @@ func (pe *ProfileEditor) setupWidget() {
 	pe.setRoutesRow.NotifyProperty("active", pe.markDirty)
 	advancedGroup.Add(pe.setRoutesRow)
 
+	pe.halfInternetRow = adw.NewSwitchRow()
+	pe.halfInternetRow.SetTitle("Half-Internet Routes")
+	pe.halfInternetRow.SetSubtitle("Use two /1 routes instead of replacing the default route")
+	pe.halfInternetRow.SetActive(false)
+	pe.halfInternetRow.NotifyProperty("active", pe.markDirty)
+	advancedGroup.Add(pe.halfInternetRow)
+
+	pe.autoReconnectRow = adw.NewSwitchRow()
+	pe.autoReconnectRow.SetTitle("Auto Reconnect")
+	pe.autoReconnectRow.SetSubtitle("Automatically reconnect if the connection drops unexpectedly")
+	pe.autoReconnectRow.SetActive(true)
+	pe.autoReconnectRow.NotifyProperty("active", pe.markDirty)
+	advancedGroup.Add(pe.autoReconnectRow)
+
 	prefsPage.Add(advancedGroup)
 
 	// Add clamp for proper width
@@ -320,43 +336,84 @@ func (pe *ProfileEditor) SetProfile(p *profile.Profile) {
 	// Switches
 	pe.setDNSRow.SetActive(p.SetDNS)
 	pe.setRoutesRow.SetActive(p.SetRoutes)
+	pe.halfInternetRow.SetActive(p.HalfInternetRoutes)
+	pe.autoReconnectRow.SetActive(p.AutoReconnect)
 
 	pe.updateAuthMethodVisibility()
 
 }
 
-// GetProfile returns the current profile with editor values.
+// editorFormValues holds the raw values read from the editor's form widgets.
+// It exists so the widget-to-profile merge (applyFormValues) is a pure,
+// testable function with no GTK dependency.
+type editorFormValues struct {
+	Name               string
+	Description        string
+	Host               string
+	Port               int
+	Realm              string
+	Username           string
+	MethodIndex        uint
+	OTPEnabled         bool
+	ClientCertPath     string
+	ClientKeyPath      string
+	TrustedCert        string
+	SetDNS             bool
+	SetRoutes          bool
+	HalfInternetRoutes bool
+	AutoReconnect      bool
+}
+
+// applyFormValues returns a copy of current with all editor-controlled fields
+// overwritten from the form values. Starting from a copy (rather than a fresh
+// struct) guarantees that any profile field without a form widget survives a
+// save unchanged — fields can only be lost by an explicit overwrite here.
+func applyFormValues(current *profile.Profile, v editorFormValues) *profile.Profile {
+	p := *current
+
+	p.Name = v.Name
+	p.Description = v.Description
+	p.Host = v.Host
+	p.Port = v.Port
+	p.Realm = v.Realm
+	p.Username = v.Username
+	p.AuthMethod = selectionToAuthMethod(v.MethodIndex, v.OTPEnabled)
+	p.ClientCertPath = v.ClientCertPath
+	p.ClientKeyPath = v.ClientKeyPath
+	p.TrustedCert = v.TrustedCert
+	p.SetDNS = v.SetDNS
+	p.SetRoutes = v.SetRoutes
+	p.HalfInternetRoutes = v.HalfInternetRoutes
+	p.AutoReconnect = v.AutoReconnect
+
+	return &p
+}
+
+// GetProfile returns a copy of the current profile with all editor-controlled
+// fields replaced by the form values. Fields not represented in the form are
+// preserved from the stored profile. Returns nil if no profile is loaded.
 func (pe *ProfileEditor) GetProfile() *profile.Profile {
 	if pe.currentProfile == nil {
 		return nil
 	}
 
-	// Create a copy with updated values
-	p := &profile.Profile{
-		ID:          pe.currentProfile.ID,
-		Name:        pe.nameRow.Text(),
-		Description: pe.descriptionRow.Text(),
-		Host:        pe.hostRow.Text(),
-		Port:        int(pe.portRow.Value()),
-	}
-
-	p.Realm = pe.realmRow.Text()
-	p.Username = pe.usernameRow.Text()
-
-	// Auth method: 0 = Password, 1 = Certificate, 2 = SAML. The 2FA toggle
-	// promotes the Password method to OTP.
-	p.AuthMethod = selectionToAuthMethod(pe.authMethodRow.Selected(), pe.otpRow.Active())
-
-	// Certificate fields
-	p.ClientCertPath = pe.clientCertRow.Text()
-	p.ClientKeyPath = pe.clientKeyRow.Text()
-	p.TrustedCert = pe.trustedCertRow.Text()
-
-	// Switches
-	p.SetDNS = pe.setDNSRow.Active()
-	p.SetRoutes = pe.setRoutesRow.Active()
-
-	return p
+	return applyFormValues(pe.currentProfile, editorFormValues{
+		Name:               pe.nameRow.Text(),
+		Description:        pe.descriptionRow.Text(),
+		Host:               pe.hostRow.Text(),
+		Port:               int(pe.portRow.Value()),
+		Realm:              pe.realmRow.Text(),
+		Username:           pe.usernameRow.Text(),
+		MethodIndex:        pe.authMethodRow.Selected(),
+		OTPEnabled:         pe.otpRow.Active(),
+		ClientCertPath:     pe.clientCertRow.Text(),
+		ClientKeyPath:      pe.clientKeyRow.Text(),
+		TrustedCert:        pe.trustedCertRow.Text(),
+		SetDNS:             pe.setDNSRow.Active(),
+		SetRoutes:          pe.setRoutesRow.Active(),
+		HalfInternetRoutes: pe.halfInternetRow.Active(),
+		AutoReconnect:      pe.autoReconnectRow.Active(),
+	})
 }
 
 // clearFields resets all fields to empty values.
@@ -374,6 +431,8 @@ func (pe *ProfileEditor) clearFields() {
 	pe.trustedCertRow.SetText("")
 	pe.setDNSRow.SetActive(true)
 	pe.setRoutesRow.SetActive(true)
+	pe.halfInternetRow.SetActive(false)
+	pe.autoReconnectRow.SetActive(true)
 }
 
 // setFieldsEnabled enables or disables all form fields.
@@ -391,6 +450,8 @@ func (pe *ProfileEditor) setFieldsEnabled(enabled bool) {
 	pe.trustedCertRow.SetSensitive(enabled)
 	pe.setDNSRow.SetSensitive(enabled)
 	pe.setRoutesRow.SetSensitive(enabled)
+	pe.halfInternetRow.SetSensitive(enabled)
+	pe.autoReconnectRow.SetSensitive(enabled)
 	pe.saveButton.SetSensitive(enabled && pe.isDirty)
 }
 

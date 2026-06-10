@@ -23,7 +23,8 @@
 - **Desktop Notifications** - Connection status notifications
 - **Secure Credential Storage** - Passwords stored in system keyring (libsecret)
 - **Auto-Connect** - Optionally connect to last used profile on startup
-- **Configurable Routing** - DNS, routes, and split tunneling options
+- **Auto Reconnect** - Automatically reconnect if the connection drops unexpectedly (configurable per profile)
+- **Configurable Routing** - DNS, routes, and split tunneling (half-internet routes)
 
 ## Installation
 
