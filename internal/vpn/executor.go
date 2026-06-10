@@ -6,7 +6,34 @@ import (
 	"io"
 	"os/exec"
 	"syscall"
+	"time"
 )
+
+// sigtermGracePeriod is how long Kill waits for a process group to exit
+// after SIGTERM before escalating to SIGKILL. Declared as a variable so
+// tests can shorten it.
+var sigtermGracePeriod = 5 * time.Second
+
+// killPollInterval is how often Kill re-checks whether the process group
+// has exited during the SIGTERM grace period.
+const killPollInterval = 100 * time.Millisecond
+
+// waitForProcessGroupExit polls the process group until it no longer exists
+// or the grace period elapses. Returns true if the group exited.
+//
+// Signal 0 performs existence/permission checks without delivering a signal:
+// ESRCH means the group is gone; nil or EPERM means it still exists (EPERM
+// occurs when the group runs as another user, e.g. root via pkexec).
+func waitForProcessGroupExit(pgid int, grace time.Duration) bool {
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pgid, 0); err == syscall.ESRCH {
+			return true
+		}
+		time.Sleep(killPollInterval)
+	}
+	return false
+}
 
 // Process represents a running process with stdin/stdout/stderr pipes.
 type Process interface {
@@ -133,6 +160,12 @@ type realProcess struct {
 // where PGID equals the PID. Using negative PID in Kill() targets the entire
 // process group, ensuring child processes (openfortivpn spawned by pkexec)
 // are also terminated.
+//
+// After SIGTERM is delivered, Kill waits up to sigtermGracePeriod for the
+// group to exit and escalates to SIGKILL if it doesn't — a process that traps
+// SIGTERM must not survive a disconnect. In the pkexec path the escalation
+// may trigger a second authentication prompt; that only happens in the rare
+// case where openfortivpn ignored SIGTERM.
 func (p *realProcess) Kill() error {
 	if p.cmd.Process == nil {
 		return nil
@@ -143,9 +176,18 @@ func (p *realProcess) Kill() error {
 	// First try sending SIGTERM to the entire process group directly.
 	// This works if the process is running as the same user.
 	// Using negative pgid kills all processes in the group.
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err == nil {
+	switch err := syscall.Kill(-pgid, syscall.SIGTERM); err {
+	case nil:
+		if waitForProcessGroupExit(pgid, sigtermGracePeriod) {
+			return nil
+		}
+		// Delivered but ignored. The group runs as our user, so we can
+		// escalate directly without pkexec.
+		if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil && killErr != syscall.ESRCH {
+			return fmt.Errorf("failed to kill process group: %w", killErr)
+		}
 		return nil
-	} else if err == syscall.ESRCH {
+	case syscall.ESRCH:
 		// Process/group already terminated - nothing to do
 		return nil
 	}
@@ -153,7 +195,7 @@ func (p *realProcess) Kill() error {
 	// Process group is likely running as root (via pkexec).
 	// Use pkexec to send SIGTERM to the process group.
 	// The "--" ensures negative numbers aren't treated as options.
-	// #nosec G204 -- pgid is from syscall.Getpgid(), not user input
+	// #nosec G204 -- pgid is the child's own PID (== PGID via Setpgid), not user input
 	killCmd := exec.Command("pkexec", "kill", "-TERM", "--", fmt.Sprintf("-%d", pgid))
 	if err := killCmd.Run(); err != nil {
 		// Check if user cancelled the pkexec authentication dialog or pkexec
@@ -162,15 +204,18 @@ func (p *realProcess) Kill() error {
 		if isPkexecCancellation(err) {
 			return fmt.Errorf("authentication cancelled or pkexec not available: %w", err)
 		}
-		// SIGTERM failed for another reason, try SIGKILL as last resort
-		// #nosec G204 -- pgid is from syscall.Getpgid(), not user input
-		killCmd = exec.Command("pkexec", "kill", "-KILL", "--", fmt.Sprintf("-%d", pgid))
-		if err := killCmd.Run(); err != nil {
-			if isPkexecCancellation(err) {
-				return fmt.Errorf("authentication cancelled or pkexec not available: %w", err)
-			}
-			return fmt.Errorf("failed to kill process group: %w", err)
+	} else if waitForProcessGroupExit(pgid, sigtermGracePeriod) {
+		return nil
+	}
+
+	// SIGTERM failed or was ignored, use SIGKILL as last resort.
+	// #nosec G204 -- pgid is the child's own PID (== PGID via Setpgid), not user input
+	killCmd = exec.Command("pkexec", "kill", "-KILL", "--", fmt.Sprintf("-%d", pgid))
+	if err := killCmd.Run(); err != nil {
+		if isPkexecCancellation(err) {
+			return fmt.Errorf("authentication cancelled or pkexec not available: %w", err)
 		}
+		return fmt.Errorf("failed to kill process group: %w", err)
 	}
 
 	return nil
@@ -218,6 +263,10 @@ type directProcess struct {
 
 // Kill terminates the process and all its children by killing the process group.
 // Since the helper daemon runs as root, we can send signals directly without pkexec.
+//
+// After SIGTERM is delivered, Kill waits up to sigtermGracePeriod for the
+// group to exit and escalates to SIGKILL if it doesn't — a process that traps
+// SIGTERM must not survive a disconnect.
 func (p *directProcess) Kill() error {
 	if p.cmd.Process == nil {
 		return nil
@@ -227,14 +276,14 @@ func (p *directProcess) Kill() error {
 
 	// Send SIGTERM to the entire process group.
 	// Using negative pgid kills all processes in the group.
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err == nil {
-		return nil
-	} else if err == syscall.ESRCH {
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err == syscall.ESRCH {
 		// Process/group already terminated - nothing to do
+		return nil
+	} else if err == nil && waitForProcessGroupExit(pgid, sigtermGracePeriod) {
 		return nil
 	}
 
-	// SIGTERM failed, try SIGKILL as last resort
+	// SIGTERM failed or was ignored, use SIGKILL as last resort.
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
 		if err == syscall.ESRCH {
 			return nil

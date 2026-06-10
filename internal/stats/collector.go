@@ -141,27 +141,41 @@ func (c *Collector) pollLoop(stopChan <-chan struct{}) {
 }
 
 // collectAndEmit reads current stats, calculates rates, and emits the result.
-// Handles counter rollover/reset by detecting when current values are less than previous.
-// The stopChan parameter is used to verify this goroutine is still the current one.
+// The callback is invoked AFTER the lock is fully released: a panicking
+// callback must not corrupt the mutex, and a slow callback must not block
+// Start/Stop.
 func (c *Collector) collectAndEmit(stopChan <-chan struct{}) {
+	stats, callback, ok := c.snapshotStats(stopChan)
+	if !ok || callback == nil {
+		return
+	}
+	callback(stats)
+}
+
+// snapshotStats reads the interface counters and updates internal state under
+// the lock, returning the stats to emit and the registered callback. Handles
+// counter rollover/reset by detecting when current values are less than
+// previous. The stopChan parameter is used to verify this goroutine is still
+// the current one. Returns ok=false when nothing should be emitted.
+func (c *Collector) snapshotStats(stopChan <-chan struct{}) (NetworkStats, func(NetworkStats), bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Check if this goroutine is stale (collector was restarted with different interface).
 	select {
 	case <-stopChan:
-		return
+		return NetworkStats{}, nil, false
 	default:
 	}
 
 	if c.interfaceName == "" {
-		return
+		return NetworkStats{}, nil, false
 	}
 
 	rx, tx, err := c.readInterfaceStats(c.interfaceName)
 	if err != nil {
 		slog.Debug("Failed to read interface stats", "interface", c.interfaceName, "error", err)
-		return
+		return NetworkStats{}, nil, false
 	}
 
 	now := time.Now()
@@ -219,13 +233,7 @@ func (c *Collector) collectAndEmit(stopChan <-chan struct{}) {
 	c.lastTx = tx
 	c.lastTime = now
 
-	callback := c.onStats
-	if callback != nil {
-		// Release lock before callback to prevent deadlocks.
-		c.mu.Unlock()
-		callback(stats)
-		c.mu.Lock()
-	}
+	return stats, c.onStats, true
 }
 
 // readInterfaceStats reads rx_bytes and tx_bytes from sysfs for the given interface.

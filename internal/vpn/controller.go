@@ -304,10 +304,11 @@ func (c *Controller) buildCommandArgs(p *profile.Profile, opts *ConnectOptions) 
 		args = append(args, "-u", p.Username)
 	}
 
-	// Add OTP if provided (for two-factor authentication)
-	if opts != nil && opts.OTP != "" {
-		args = append(args, fmt.Sprintf("--otp=%s", opts.OTP))
-	}
+	// NOTE: the OTP is intentionally NOT passed via --otp. Command-line
+	// arguments are world-readable through /proc/<pid>/cmdline, and the
+	// token is live during the exact window an attacker would race. It is
+	// delivered via stdin instead (see setupCredentialInput) — openfortivpn
+	// reads the token from stdin when the gateway issues a 2FA challenge.
 
 	// Add realm if specified
 	if p.Realm != "" {
@@ -362,13 +363,10 @@ func (c *Controller) buildCommandArgs(p *profile.Profile, opts *ConnectOptions) 
 // The command is run via pkexec for privilege escalation since openfortivpn
 // requires root privileges to create network interfaces.
 //
-// SECURITY: Password is passed via stdin, NOT command-line arguments.
-// Command-line arguments are visible to all users via /proc or `ps aux`,
-// which would expose credentials. Stdin is secure as it's only accessible
-// by the process itself. NEVER pass passwords as CLI arguments.
-//
-// Note: OTP is passed via --otp flag as it's time-limited and single-use,
-// making command-line exposure an acceptable trade-off for implementation simplicity.
+// SECURITY: Password and OTP are passed via stdin, NOT command-line
+// arguments. Command-line arguments are visible to all users via /proc or
+// `ps aux`, which would expose credentials. Stdin is secure as it's only
+// accessible by the process itself. NEVER pass secrets as CLI arguments.
 func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *ConnectOptions) error {
 	if !c.CanConnect() {
 		return fmt.Errorf("cannot connect: current state is %s", c.GetState())
@@ -395,8 +393,8 @@ func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *Conn
 		return err
 	}
 
-	// Set up password input for non-SAML authentication
-	c.setupPasswordInput(p, opts.Password)
+	// Set up credential input (password and/or OTP) for non-SAML authentication
+	c.setupCredentialInput(p, opts)
 
 	// Set up stdout/stderr processing
 	c.setupOutputProcessing(process)
@@ -412,10 +410,14 @@ func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *Conn
 // In direct mode (helper daemon), it runs openfortivpn directly.
 // Returns the started process or an error. On error, the state is set to Failed.
 func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts *ConnectOptions) (Process, error) {
-	// Create cancellable context
+	// Create cancellable context. Stored under lock: other goroutines
+	// (setupOutputProcessing, handleProcessCompletion) read these fields
+	// under the same mutex.
 	ctx, cancel := context.WithCancel(ctx)
+	c.mu.Lock()
 	c.ctx = ctx
 	c.cancel = cancel
+	c.mu.Unlock()
 
 	// Build command arguments
 	vpnArgs := c.buildCommandArgs(p, opts)
@@ -432,8 +434,10 @@ func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts 
 		process, err = c.executor.CreateProcess(ctx, "pkexec", args...)
 	}
 	if err != nil {
+		c.mu.Lock()
 		c.ctx = nil
 		c.cancel = nil
+		c.mu.Unlock()
 		if stateErr := c.setState(StateFailed); stateErr != nil {
 			slog.Warn("Failed to set failed state", "error", stateErr)
 		}
@@ -450,9 +454,9 @@ func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts 
 		c.mu.Lock()
 		c.process = nil
 		c.stdin = nil
-		c.mu.Unlock()
 		c.ctx = nil
 		c.cancel = nil
+		c.mu.Unlock()
 		if stateErr := c.setState(StateFailed); stateErr != nil {
 			slog.Warn("Failed to set failed state", "error", stateErr)
 		}
@@ -462,11 +466,27 @@ func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts 
 	return process, nil
 }
 
-// setupPasswordInput writes the password to stdin for password-based authentication.
-// SECURITY: Uses stdin (not CLI args) to prevent password exposure in process listings.
-// SAML authentication doesn't require password input - credentials come from browser.
-func (c *Controller) setupPasswordInput(p *profile.Profile, password string) {
-	if p.AuthMethod == profile.AuthMethodSAML || password == "" {
+// setupCredentialInput writes the password and OTP to stdin, each on its own
+// line: openfortivpn reads the password first, then — when the gateway issues
+// a 2FA challenge — reads the one-time token from stdin as well. The pipe
+// buffers the second line until the challenge arrives.
+//
+// SECURITY: Uses stdin (not CLI args) to prevent credential exposure in
+// process listings. SAML authentication doesn't require credential input -
+// credentials come from the browser.
+func (c *Controller) setupCredentialInput(p *profile.Profile, opts *ConnectOptions) {
+	if p.AuthMethod == profile.AuthMethodSAML {
+		return
+	}
+
+	var payload string
+	if opts.Password != "" {
+		payload += opts.Password + "\n"
+	}
+	if opts.OTP != "" {
+		payload += opts.OTP + "\n"
+	}
+	if payload == "" {
 		return
 	}
 
@@ -482,11 +502,20 @@ func (c *Controller) setupPasswordInput(p *profile.Profile, password string) {
 	}
 
 	go func() {
-		if _, err := stdin.Write([]byte(password + "\n")); err != nil {
-			c.emitError(fmt.Errorf("failed to write password to stdin: %w", err))
+		if _, err := stdin.Write([]byte(payload)); err != nil {
+			c.emitError(fmt.Errorf("failed to write credentials to stdin: %w", err))
 		}
 	}()
 }
+
+// Scanner buffer sizing for openfortivpn output. The bufio.Scanner default
+// caps tokens at 64 KiB; a single longer line would error the scanner and
+// silently kill output processing for the rest of the connection, so the cap
+// is raised explicitly.
+const (
+	outputScannerInitialSize = 64 * 1024
+	outputScannerMaxLineSize = 1024 * 1024
+)
 
 // setupOutputProcessing starts goroutines to process stdout and stderr.
 // The goroutines respect context cancellation and will stop processing
@@ -496,53 +525,45 @@ func (c *Controller) setupOutputProcessing(process Process) {
 	ctx := c.ctx
 	c.mu.RUnlock()
 
-	// Process stdout
-	go func() {
-		scanner := bufio.NewScanner(process.Stdout())
-		for scanner.Scan() {
-			// Check if context was cancelled before processing output
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			c.processOutput(scanner.Text())
-		}
-		// Scanner errors when pipe closes are expected during normal process exit
-		// Don't emit errors if context was cancelled (intentional shutdown)
-		if err := scanner.Err(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				c.emitError(fmt.Errorf("stdout scanner error: %w", err))
-			}
-		}
-	}()
+	go c.scanOutput(ctx, "stdout", process.Stdout())
+	go c.scanOutput(ctx, "stderr", process.Stderr())
+}
 
-	// Process stderr
-	go func() {
-		scanner := bufio.NewScanner(process.Stderr())
-		for scanner.Scan() {
-			// Check if context was cancelled before processing output
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			c.processOutput(scanner.Text())
+// scanOutput reads one output stream line by line until EOF or context
+// cancellation, forwarding each line to processOutput. Scanner errors are
+// surfaced via emitError unless the context was cancelled (intentional
+// shutdown); an ErrTooLong is reported explicitly since it means output was
+// dropped despite the enlarged buffer.
+func (c *Controller) scanOutput(ctx context.Context, streamName string, r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, outputScannerInitialSize), outputScannerMaxLineSize)
+
+	for scanner.Scan() {
+		// Check if context was cancelled before processing output
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
-		// Scanner errors when pipe closes are expected during normal process exit
-		// Don't emit errors if context was cancelled (intentional shutdown)
-		if err := scanner.Err(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				c.emitError(fmt.Errorf("stderr scanner error: %w", err))
-			}
-		}
-	}()
+		c.processOutput(scanner.Text())
+	}
+
+	// Scanner errors when pipe closes are expected during normal process exit
+	// Don't emit errors if context was cancelled (intentional shutdown)
+	err := scanner.Err()
+	if err == nil || errors.Is(err, io.ErrClosedPipe) {
+		return
+	}
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+	if errors.Is(err, bufio.ErrTooLong) {
+		c.emitError(fmt.Errorf("%s line exceeded %d bytes; remaining output for this connection is lost", streamName, outputScannerMaxLineSize))
+		return
+	}
+	c.emitError(fmt.Errorf("%s scanner error: %w", streamName, err))
 }
 
 // handleProcessCompletion waits for the process to exit and cleans up resources.

@@ -20,9 +20,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testHandler is a simple handler for testing.
-func testHandler(req *protocol.Request) *protocol.Response {
-	resp, err := protocol.NewSuccessResponse(req.ID, map[string]string{"status": "ok"})
+// testHandler is a simple handler for testing. It echoes the server-assigned
+// client ID in the response so tests can address individual clients.
+func testHandler(req *protocol.Request, clientID string) *protocol.Response {
+	resp, err := protocol.NewSuccessResponse(req.ID, map[string]string{"status": "ok", "client_id": clientID})
 	if err != nil {
 		panic(fmt.Sprintf("testHandler: NewSuccessResponse failed: %v", err))
 	}
@@ -319,4 +320,90 @@ func TestServerInvalidJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, resp.Error)
 	assert.Equal(t, protocol.ErrCodeInvalidRequest, resp.Error.Code)
+}
+
+// requestClientID sends a request over conn and returns the server-assigned
+// client ID echoed back by testHandler.
+func requestClientID(t *testing.T, conn net.Conn, reader *bufio.Reader) string {
+	t.Helper()
+
+	req := protocol.Request{
+		Type:    protocol.MessageTypeRequest,
+		ID:      "id-req",
+		Command: "status",
+	}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+	_, err = conn.Write(append(data, '\n'))
+	require.NoError(t, err)
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	line, err := reader.ReadBytes('\n')
+	require.NoError(t, err)
+
+	var resp protocol.Response
+	require.NoError(t, json.Unmarshal(line, &resp))
+	var result map[string]string
+	require.NoError(t, json.Unmarshal(resp.Result, &result))
+	require.NotEmpty(t, result["client_id"])
+	return result["client_id"]
+}
+
+// TestServerSendToClient verifies that SendToClient delivers an event to
+// exactly one client while other connected clients receive nothing.
+func TestServerSendToClient(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "test.sock")
+	server := NewServerWithGroup(socketPath, "", testHandler)
+
+	require.NoError(t, server.Start())
+	defer func() { _ = server.Stop() }()
+
+	connA, err := net.Dial("unix", socketPath)
+	require.NoError(t, err)
+	defer func() { _ = connA.Close() }()
+	readerA := bufio.NewReader(connA)
+
+	connB, err := net.Dial("unix", socketPath)
+	require.NoError(t, err)
+	defer func() { _ = connB.Close() }()
+	readerB := bufio.NewReader(connB)
+
+	waitForClientCount(t, server, 2, 1*time.Second)
+
+	idA := requestClientID(t, connA, readerA)
+	idB := requestClientID(t, connB, readerB)
+	require.NotEqual(t, idA, idB, "each connection must get a distinct client ID")
+
+	event, err := protocol.NewEvent(protocol.EventOutput, protocol.OutputData{Line: "private line"})
+	require.NoError(t, err)
+	require.NoError(t, server.SendToClient(idA, event))
+
+	// Client A receives the event.
+	require.NoError(t, connA.SetReadDeadline(time.Now().Add(2*time.Second)))
+	line, err := readerA.ReadBytes('\n')
+	require.NoError(t, err)
+	var evt protocol.Event
+	require.NoError(t, json.Unmarshal(line, &evt))
+	assert.Equal(t, protocol.EventOutput, evt.Name)
+
+	// Client B must receive nothing.
+	require.NoError(t, connB.SetReadDeadline(time.Now().Add(300*time.Millisecond)))
+	_, err = readerB.ReadBytes('\n')
+	var netErr net.Error
+	require.True(t, errors.As(err, &netErr) && netErr.Timeout(),
+		"bystander client must not receive the scoped event, got: %v", err)
+}
+
+// TestServerSendToClient_UnknownClient verifies that sending to a
+// disconnected/unknown client is not an error — the event is dropped.
+func TestServerSendToClient_UnknownClient(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "test.sock")
+	server := NewServerWithGroup(socketPath, "", testHandler)
+
+	require.NoError(t, server.Start())
+	defer func() { _ = server.Stop() }()
+
+	event, err := protocol.NewEvent(protocol.EventOutput, protocol.OutputData{Line: "into the void"})
+	require.NoError(t, err)
+	assert.NoError(t, server.SendToClient("client-999", event))
 }

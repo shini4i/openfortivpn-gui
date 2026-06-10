@@ -55,15 +55,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create thread-safe broadcaster to avoid race condition during initialization
-	broadcaster := &safeBroadcaster{}
+	// Create thread-safe event sender to avoid race condition during initialization
+	sender := &safeEventSender{}
 
 	// Create manager and server
-	mgr := manager.NewManager(*openfortivpnPath, broadcaster.Broadcast)
+	mgr := manager.NewManager(*openfortivpnPath, sender)
 	srv := server.NewServer(*socketPath, mgr.HandleRequest)
 
-	// Now that server is created, set it in the broadcaster
-	broadcaster.SetServer(srv)
+	// Now that server is created, set it in the sender
+	sender.SetServer(srv)
 
 	// Start server
 	if err := srv.Start(); err != nil {
@@ -166,26 +166,36 @@ func watchdogLoop() {
 	}
 }
 
-// safeBroadcaster provides thread-safe event broadcasting to clients.
+// safeEventSender provides thread-safe event delivery to clients.
 // This avoids a race condition during initialization where the server
-// might not be set yet when events are broadcast.
-type safeBroadcaster struct {
+// might not be set yet when events are sent. It implements manager.EventSender.
+type safeEventSender struct {
 	mu  sync.RWMutex
 	srv *server.Server
 }
 
-// SetServer sets the server for broadcasting.
-func (b *safeBroadcaster) SetServer(srv *server.Server) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.srv = srv
+// SetServer sets the server used for event delivery.
+func (s *safeEventSender) SetServer(srv *server.Server) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.srv = srv
 }
 
 // Broadcast sends an event to all connected clients.
-func (b *safeBroadcaster) Broadcast(event *protocol.Event) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	if b.srv != nil {
-		b.srv.Broadcast(event)
+func (s *safeEventSender) Broadcast(event *protocol.Event) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.srv != nil {
+		s.srv.Broadcast(event)
 	}
+}
+
+// SendToClient sends an event to a single client.
+func (s *safeEventSender) SendToClient(clientID string, event *protocol.Event) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.srv != nil {
+		return s.srv.SendToClient(clientID, event)
+	}
+	return nil
 }

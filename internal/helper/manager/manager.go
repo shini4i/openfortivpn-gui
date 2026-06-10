@@ -39,33 +39,47 @@ var sensitivePathPrefixes = []string{
 	"/var/log/",
 }
 
-// EventBroadcaster is called to broadcast events to all clients.
-type EventBroadcaster func(event *protocol.Event)
+// EventSender delivers events to clients. Broadcast reaches every connected
+// client; SendToClient reaches exactly one. The split exists for privacy:
+// coarse state changes are public, but openfortivpn output and error text can
+// carry connection details and must only reach the client that initiated the
+// connection.
+type EventSender interface {
+	Broadcast(event *protocol.Event)
+	SendToClient(clientID string, event *protocol.Event) error
+}
 
 // Manager handles VPN operations and translates between the protocol and controller.
 type Manager struct {
-	controller  vpn.VPNController
-	broadcaster EventBroadcaster
+	controller vpn.VPNController
+	sender     EventSender
 
 	mu                 sync.RWMutex
 	connectedProfileID string
+	activeClientID     string // client that initiated the current connection
 }
 
 // NewManager creates a new VPN manager with a default controller.
 // This is a convenience wrapper around NewManagerWithController.
-func NewManager(openfortivpnPath string, broadcaster EventBroadcaster) *Manager {
-	return NewManagerWithController(vpn.NewController(openfortivpnPath, vpn.WithDirectMode()), broadcaster)
+func NewManager(openfortivpnPath string, sender EventSender) *Manager {
+	return NewManagerWithController(vpn.NewController(openfortivpnPath, vpn.WithDirectMode()), sender)
 }
 
 // NewManagerWithController creates a new VPN manager with the provided controller.
 // This constructor allows injecting a mock controller for testing.
-func NewManagerWithController(controller vpn.VPNController, broadcaster EventBroadcaster) *Manager {
-	m := &Manager{
-		controller:  controller,
-		broadcaster: broadcaster,
+// Panics if sender is nil: silently dropping events would hide the
+// client-scoping guarantees this type exists to provide.
+func NewManagerWithController(controller vpn.VPNController, sender EventSender) *Manager {
+	if sender == nil {
+		panic("manager: NewManagerWithController called with nil EventSender")
 	}
 
-	// Set up callbacks to broadcast events
+	m := &Manager{
+		controller: controller,
+		sender:     sender,
+	}
+
+	// Set up callbacks to forward controller events to clients
 	m.controller.OnStateChange(m.onStateChange)
 	m.controller.OnOutput(m.onOutput)
 	m.controller.OnEvent(m.onEvent)
@@ -74,11 +88,11 @@ func NewManagerWithController(controller vpn.VPNController, broadcaster EventBro
 	return m
 }
 
-// HandleRequest processes a request and returns a response.
-func (m *Manager) HandleRequest(req *protocol.Request) *protocol.Response {
+// HandleRequest processes a request from the given client and returns a response.
+func (m *Manager) HandleRequest(req *protocol.Request, clientID string) *protocol.Response {
 	switch req.Command {
 	case protocol.CommandConnect:
-		return m.handleConnect(req)
+		return m.handleConnect(req, clientID)
 	case protocol.CommandDisconnect:
 		return m.handleDisconnect(req)
 	case protocol.CommandStatus:
@@ -89,19 +103,23 @@ func (m *Manager) HandleRequest(req *protocol.Request) *protocol.Response {
 	}
 }
 
-func (m *Manager) handleConnect(req *protocol.Request) *protocol.Response {
+func (m *Manager) handleConnect(req *protocol.Request, clientID string) *protocol.Response {
 	var params protocol.ConnectParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return protocol.NewErrorResponse(req.ID, protocol.ErrCodeInvalidParams,
 			"invalid connect params")
 	}
 
-	// Validate file paths to prevent path traversal attacks
-	if err := validateFilePath(params.ClientCertPath); err != nil {
+	// Validate file paths to prevent path traversal attacks. The RESOLVED
+	// paths are what gets handed to openfortivpn: validating one path and
+	// opening another would leave a symlink-swap TOCTOU window.
+	certPath, err := validateAndResolveFilePath(params.ClientCertPath)
+	if err != nil {
 		return protocol.NewErrorResponse(req.ID, protocol.ErrCodeInvalidParams,
 			fmt.Sprintf("invalid client cert path: %v", err))
 	}
-	if err := validateFilePath(params.ClientKeyPath); err != nil {
+	keyPath, err := validateAndResolveFilePath(params.ClientKeyPath)
+	if err != nil {
 		return protocol.NewErrorResponse(req.ID, protocol.ErrCodeInvalidParams,
 			fmt.Sprintf("invalid client key path: %v", err))
 	}
@@ -116,8 +134,8 @@ func (m *Manager) handleConnect(req *protocol.Request) *protocol.Response {
 		AuthMethod:         profile.AuthMethod(params.AuthMethod),
 		Realm:              params.Realm,
 		TrustedCert:        params.TrustedCert,
-		ClientCertPath:     params.ClientCertPath,
-		ClientKeyPath:      params.ClientKeyPath,
+		ClientCertPath:     certPath,
+		ClientKeyPath:      keyPath,
 		SetDNS:             params.SetDNS,
 		SetRoutes:          params.SetRoutes,
 		HalfInternetRoutes: params.HalfInternetRoutes,
@@ -129,8 +147,9 @@ func (m *Manager) handleConnect(req *protocol.Request) *protocol.Response {
 			fmt.Sprintf("invalid profile: %v", err))
 	}
 
-	// Check if we can connect and store profile ID atomically to prevent race conditions
-	// where two concurrent connects could both pass CanConnect() check
+	// Check if we can connect and store profile/client IDs atomically to
+	// prevent race conditions where two concurrent connects could both pass
+	// the CanConnect() check
 	m.mu.Lock()
 	if !m.controller.CanConnect() {
 		m.mu.Unlock()
@@ -138,6 +157,7 @@ func (m *Manager) handleConnect(req *protocol.Request) *protocol.Response {
 			fmt.Sprintf("cannot connect: current state is %s", m.controller.GetState()))
 	}
 	m.connectedProfileID = params.ProfileID
+	m.activeClientID = clientID
 	m.mu.Unlock()
 
 	// Build connect options
@@ -150,6 +170,7 @@ func (m *Manager) handleConnect(req *protocol.Request) *protocol.Response {
 	if err := m.controller.Connect(context.Background(), p, opts); err != nil {
 		m.mu.Lock()
 		m.connectedProfileID = ""
+		m.activeClientID = ""
 		m.mu.Unlock()
 		return protocol.NewErrorResponse(req.ID, protocol.ErrCodeConnectionFailed, err.Error())
 	}
@@ -161,53 +182,55 @@ func (m *Manager) handleConnect(req *protocol.Request) *protocol.Response {
 	return resp
 }
 
-// validateFilePath validates that a file path is safe for use with the VPN client.
+// validateAndResolveFilePath validates that a file path is safe for use with
+// the VPN client and returns the symlink-resolved path the caller MUST use.
 // It defends against:
-//   - Path traversal attacks (../)
+//   - Path traversal to sensitive locations (".." segments are normalized by
+//     Clean/EvalSymlinks and the result is checked against the sensitive list)
 //   - Non-absolute paths
 //   - Symlink-based attacks pointing to sensitive system files
 //
-// The function resolves symlinks and checks that the real path doesn't point to
-// sensitive system locations that could leak information through error messages.
-func validateFilePath(path string) error {
+// Returning the resolved path closes the TOCTOU window that existed when the
+// ORIGINAL path was passed to openfortivpn (running as root): an attacker
+// could swap a validated path for a symlink to a sensitive file between
+// validation and open. With the resolved path, the object that was validated
+// is the object that gets opened.
+//
+// For paths that don't exist yet, symlinks can't be resolved; the cleaned
+// path is checked lexically against the sensitive list and returned so
+// openfortivpn reports the missing file itself.
+func validateAndResolveFilePath(path string) (string, error) {
 	if path == "" {
-		return nil // Empty paths are allowed (optional fields)
-	}
-
-	// Check for path traversal BEFORE cleaning (Clean resolves .. sequences)
-	if strings.Contains(path, "..") {
-		return fmt.Errorf("path traversal not allowed")
+		return "", nil // Empty paths are allowed (optional fields)
 	}
 
 	// Must be absolute path
 	if !filepath.IsAbs(path) {
-		return fmt.Errorf("path must be absolute")
+		return "", fmt.Errorf("path must be absolute")
 	}
 
-	// Resolve symlinks to get the real path.
-	// NOTE: There is an acknowledged TOCTOU (time-of-check-time-of-use) window between
-	// this validation and when openfortivpn actually opens the file. An attacker could
-	// theoretically create a symlink to a sensitive location after this check passes
-	// but before openfortivpn uses the file. This risk is accepted by the threat model
-	// because: (1) the window is very small, (2) it requires local attacker access,
-	// and (3) openfortivpn runs with limited privileges. We intentionally allow
-	// os.IsNotExist errors to pass through so openfortivpn handles missing files.
-	realPath, err := resolvePathSafely(path)
+	cleanPath := filepath.Clean(path)
+
+	realPath, err := resolvePathSafely(cleanPath)
 	if err != nil {
 		// If the file doesn't exist, we can't resolve symlinks.
-		// Allow it through - openfortivpn will handle the error appropriately.
+		// Enforce the sensitive-path policy on the cleaned path and let
+		// openfortivpn handle the missing-file error.
 		if os.IsNotExist(err) {
-			return nil
+			if isSensitivePath(cleanPath) {
+				return "", fmt.Errorf("access to sensitive system path not allowed")
+			}
+			return cleanPath, nil
 		}
-		return fmt.Errorf("failed to resolve path: %w", err)
+		return "", fmt.Errorf("failed to resolve path: %w", err)
 	}
 
 	// Check if resolved path points to sensitive locations
 	if isSensitivePath(realPath) {
-		return fmt.Errorf("access to sensitive system path not allowed")
+		return "", fmt.Errorf("access to sensitive system path not allowed")
 	}
 
-	return nil
+	return realPath, nil
 }
 
 // resolvePathSafely resolves symlinks in a path, handling the case where
@@ -246,18 +269,14 @@ func (m *Manager) handleDisconnect(req *protocol.Request) *protocol.Response {
 	}
 
 	if err := m.controller.Disconnect(context.Background()); err != nil {
-		// Clear connectedProfileID even on error - the connection may be
+		// Clear connection tracking even on error - the connection may be
 		// effectively terminated even if the controller reports failure.
 		// This matches onStateChange cleanup behavior for edge cases.
-		m.mu.Lock()
-		m.connectedProfileID = ""
-		m.mu.Unlock()
+		m.clearActiveConnection()
 		return protocol.NewErrorResponse(req.ID, protocol.ErrCodeDisconnectFailed, err.Error())
 	}
 
-	m.mu.Lock()
-	m.connectedProfileID = ""
-	m.mu.Unlock()
+	m.clearActiveConnection()
 
 	resp, err := protocol.NewSuccessResponse(req.ID, nil)
 	if err != nil {
@@ -284,6 +303,32 @@ func (m *Manager) handleStatus(req *protocol.Request) *protocol.Response {
 	return resp
 }
 
+// clearActiveConnection resets the connection-tracking state.
+func (m *Manager) clearActiveConnection() {
+	m.mu.Lock()
+	m.connectedProfileID = ""
+	m.activeClientID = ""
+	m.mu.Unlock()
+}
+
+// sendToActiveClient delivers an event only to the client that initiated the
+// current connection. If no connection is active the event is dropped:
+// openfortivpn output and error text can carry connection details (usernames,
+// gateway responses) that must not reach bystander clients on the socket.
+func (m *Manager) sendToActiveClient(event *protocol.Event) {
+	m.mu.RLock()
+	clientID := m.activeClientID
+	m.mu.RUnlock()
+
+	if clientID == "" {
+		return
+	}
+
+	if err := m.sender.SendToClient(clientID, event); err != nil {
+		slog.Warn("Failed to send event to client", "client", clientID, "error", err)
+	}
+}
+
 func (m *Manager) onStateChange(old, new vpn.ConnectionState) {
 	event, err := protocol.NewEvent(protocol.EventStateChange, protocol.StateChangeData{
 		From: string(old),
@@ -293,13 +338,13 @@ func (m *Manager) onStateChange(old, new vpn.ConnectionState) {
 		slog.Error("Failed to create state change event", "error", err)
 		return
 	}
-	m.broadcaster(event)
+	// Coarse connection state is intentionally public: every client needs it
+	// to render the correct UI state.
+	m.sender.Broadcast(event)
 
-	// Clear profile ID when disconnected
+	// Clear connection tracking when disconnected
 	if new == vpn.StateDisconnected || new == vpn.StateFailed {
-		m.mu.Lock()
-		m.connectedProfileID = ""
-		m.mu.Unlock()
+		m.clearActiveConnection()
 	}
 }
 
@@ -311,7 +356,7 @@ func (m *Manager) onOutput(line string) {
 		slog.Error("Failed to create output event", "error", err)
 		return
 	}
-	m.broadcaster(event)
+	m.sendToActiveClient(event)
 }
 
 func (m *Manager) onEvent(e *vpn.OutputEvent) {
@@ -325,7 +370,7 @@ func (m *Manager) onEvent(e *vpn.OutputEvent) {
 		slog.Error("Failed to create VPN event", "error", err)
 		return
 	}
-	m.broadcaster(event)
+	m.sendToActiveClient(event)
 }
 
 func (m *Manager) onError(err error) {
@@ -336,7 +381,7 @@ func (m *Manager) onError(err error) {
 		slog.Error("Failed to create error event", "error", eventErr)
 		return
 	}
-	m.broadcaster(event)
+	m.sendToActiveClient(event)
 }
 
 // GetState returns the current VPN state.

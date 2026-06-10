@@ -1,14 +1,80 @@
 package vpn
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// TestDirectProcess_Kill_EscalatesToSigkill verifies that a process which
+// traps SIGTERM is still terminated: Kill must escalate to SIGKILL after the
+// grace period instead of reporting success on mere signal delivery.
+//
+// Regression test: Kill previously returned nil as soon as SIGTERM was
+// delivered, so a wedged openfortivpn that ignored SIGTERM kept the tunnel
+// up while the UI reported a successful disconnect.
+func TestDirectProcess_Kill_EscalatesToSigkill(t *testing.T) {
+	oldGrace := sigtermGracePeriod
+	sigtermGracePeriod = 300 * time.Millisecond
+	defer func() { sigtermGracePeriod = oldGrace }()
+
+	e := NewDirectExecutor()
+	// The shell traps SIGTERM and loops forever; only SIGKILL can stop it.
+	proc, err := e.CreateProcess(context.Background(), "sh", "-c", `trap "" TERM; while true; do sleep 0.1; done`)
+	require.NoError(t, err)
+	require.NoError(t, proc.Start())
+
+	done := make(chan struct{})
+	go func() {
+		_ = proc.Wait()
+		close(done)
+	}()
+
+	// Give the shell a moment to install the trap.
+	time.Sleep(200 * time.Millisecond)
+
+	require.NoError(t, proc.Kill())
+
+	select {
+	case <-done:
+		// Process died — escalation worked.
+	case <-time.After(5 * time.Second):
+		t.Fatal("process survived Kill: SIGTERM was ignored and no SIGKILL escalation happened")
+	}
+}
+
+// TestDirectProcess_Kill_GracefulExitSkipsSigkill verifies that a process
+// which honors SIGTERM exits within the grace period without needing SIGKILL.
+func TestDirectProcess_Kill_GracefulExitSkipsSigkill(t *testing.T) {
+	e := NewDirectExecutor()
+	proc, err := e.CreateProcess(context.Background(), "sleep", "30")
+	require.NoError(t, err)
+	require.NoError(t, proc.Start())
+
+	done := make(chan struct{})
+	go func() {
+		_ = proc.Wait()
+		close(done)
+	}()
+
+	start := time.Now()
+	require.NoError(t, proc.Kill())
+
+	select {
+	case <-done:
+		assert.Less(t, time.Since(start), sigtermGracePeriod,
+			"a SIGTERM-compliant process must exit well before the grace period elapses")
+	case <-time.After(5 * time.Second):
+		t.Fatal("process did not exit after SIGTERM")
+	}
+}
 
 func TestIsPkexecCancellation(t *testing.T) {
 	tests := []struct {

@@ -168,6 +168,42 @@ func TestManager_ShouldReconnect_MaxAttemptsReached(t *testing.T) {
 	assert.False(t, result)
 }
 
+// TestReconnectDelay_ExponentialBackoffWithJitter verifies the delay grows
+// exponentially per attempt, is capped, and stays within the jitter envelope.
+//
+// Regression test: reconnect previously used a fixed delay for every attempt,
+// hammering a flapping gateway at a constant cadence.
+func TestReconnectDelay_ExponentialBackoffWithJitter(t *testing.T) {
+	base := 5 * time.Second
+
+	tests := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{attempt: 1, want: 5 * time.Second},
+		{attempt: 2, want: 10 * time.Second},
+		{attempt: 3, want: 20 * time.Second},
+		{attempt: 4, want: 40 * time.Second},
+		{attempt: 5, want: maxReconnectDelay},  // 80s capped to 60s
+		{attempt: 50, want: maxReconnectDelay}, // huge attempt must not overflow
+	}
+
+	for _, tt := range tests {
+		got := reconnectDelay(base, tt.attempt)
+		lo := time.Duration(float64(tt.want) * (1 - reconnectJitterFraction))
+		hi := time.Duration(float64(tt.want) * (1 + reconnectJitterFraction))
+		assert.GreaterOrEqual(t, got, lo, "attempt %d below jitter envelope", tt.attempt)
+		assert.LessOrEqual(t, got, hi, "attempt %d above jitter envelope", tt.attempt)
+	}
+}
+
+// TestReconnectDelay_ZeroBase verifies a zero base delay stays zero — tests
+// and configurations relying on immediate reconnect must keep working.
+func TestReconnectDelay_ZeroBase(t *testing.T) {
+	assert.Equal(t, time.Duration(0), reconnectDelay(0, 1))
+	assert.Equal(t, time.Duration(0), reconnectDelay(0, 5))
+}
+
 func TestManager_StartReconnect(t *testing.T) {
 	scheduled := make(chan struct{})
 	scheduleOnMain := func(fn func()) {

@@ -2,6 +2,10 @@
 Description=OpenFortiVPN GUI Helper Daemon
 Documentation=https://github.com/shini4i/openfortivpn-gui
 After=network.target
+# Bound crash-restart loops: at most 5 starts per minute, then fail the unit
+# instead of hammering the system forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -10,14 +14,34 @@ Restart=on-failure
 RestartSec=5
 Group=openfortivpn-gui
 
-# Security hardening
-NoNewPrivileges=false
+# Security hardening. The helper parses untrusted JSON from every member of
+# the openfortivpn-gui group while running as root — these directives bound
+# the blast radius of a compromised helper process.
+#
+# Neither the helper nor openfortivpn/pppd performs setuid transitions, so
+# privilege re-escalation via setuid binaries is denied outright.
+NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Pure Go binary spawning C children — nothing needs writable+executable memory.
+MemoryDenyWriteExecute=true
+# AF_UNIX: client socket + sd_notify; AF_INET/AF_INET6: TLS to the gateway;
+# AF_NETLINK: route and DNS configuration. pppd uses /dev/ppp (a device, not
+# a socket family), so nothing else is required.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 # Restrict Linux capabilities to the minimum required for VPN operations
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH

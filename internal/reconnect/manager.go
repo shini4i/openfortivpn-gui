@@ -5,12 +5,47 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"time"
 
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
+
+const (
+	// maxReconnectDelay caps the exponential backoff so reconnects keep
+	// happening at a reasonable cadence even after many failed attempts.
+	maxReconnectDelay = 60 * time.Second
+	// reconnectJitterFraction is the relative jitter (±20%) applied to each
+	// delay so multiple clients don't hammer a recovering gateway in lockstep.
+	reconnectJitterFraction = 0.2
+)
+
+// reconnectDelay returns the delay before the given attempt (1-based):
+// exponential backoff (base * 2^(attempt-1)) capped at maxReconnectDelay,
+// with ±reconnectJitterFraction random jitter. A non-positive base returns
+// zero, preserving immediate-reconnect configurations.
+func reconnectDelay(base time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+
+	delay := base
+	for i := 1; i < attempt && delay < maxReconnectDelay; i++ {
+		delay *= 2
+	}
+	if delay > maxReconnectDelay {
+		delay = maxReconnectDelay
+	}
+
+	// #nosec G404 -- jitter spreads reconnect timing; not security-sensitive
+	jitter := 1 + reconnectJitterFraction*(2*rand.Float64()-1)
+	return time.Duration(float64(delay) * jitter)
+}
 
 // Config holds reconnection configuration.
 type Config struct {
@@ -193,7 +228,8 @@ func (m *Manager) ShouldReconnect(oldState, newState vpn.ConnectionState) bool {
 }
 
 // StartReconnect begins the reconnection sequence.
-// Increments attempt counter and schedules a reconnection after the configured delay.
+// Increments attempt counter and schedules a reconnection after an
+// exponentially backed-off, jittered delay derived from the configured base.
 func (m *Manager) StartReconnect() {
 	m.mu.Lock()
 
@@ -209,7 +245,7 @@ func (m *Manager) StartReconnect() {
 		m.reconnectTimer.Stop()
 	}
 
-	delay := time.Duration(m.config.DelaySeconds) * time.Second
+	delay := reconnectDelay(time.Duration(m.config.DelaySeconds)*time.Second, attempt)
 
 	// Schedule reconnect on main thread.
 	// Capture timer reference to detect if it was cancelled/replaced before callback runs.

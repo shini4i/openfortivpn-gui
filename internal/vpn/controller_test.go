@@ -3,6 +3,7 @@ package vpn
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -303,7 +304,9 @@ func TestController_BuildCommandArgs(t *testing.T) {
 			},
 		},
 		{
-			name: "otp auth passes --otp flag and keeps username",
+			// SECURITY: the OTP must never appear in argv — it is delivered
+			// via stdin (see TestController_Connect_OTP_DeliversPasswordAndOTP).
+			name: "otp auth keeps username and never puts the otp in argv",
 			p: &profile.Profile{
 				Host: host, Port: port, Username: "testuser",
 				AuthMethod: profile.AuthMethodOTP,
@@ -313,14 +316,13 @@ func TestController_BuildCommandArgs(t *testing.T) {
 			want: []string{
 				"vpn.example.com:443",
 				"-u", "testuser",
-				"--otp=123456",
 				"--set-dns=1",
 				"--set-routes=1",
 				"--half-internet-routes=0",
 			},
 		},
 		{
-			name: "otp auth without otp value omits --otp flag",
+			name: "otp auth without otp value produces same argv",
 			p: &profile.Profile{
 				Host: host, Port: port, Username: "testuser",
 				AuthMethod: profile.AuthMethodOTP,
@@ -395,11 +397,11 @@ func TestController_BuildCommandArgs(t *testing.T) {
 	}
 }
 
-// TestController_Connect_OTP_DeliversPasswordAndOTP verifies that a single 2FA
-// connection delivers BOTH credentials by their respective channels: the
-// one-time password as the --otp command-line flag, and the account password
-// via stdin (never argv). This is the end-to-end guarantee that a 2FA connect
-// passes everything openfortivpn needs.
+// TestController_Connect_OTP_DeliversPasswordAndOTP verifies that a 2FA
+// connection delivers BOTH credentials via stdin — password first (answering
+// openfortivpn's password prompt), then the one-time password (answering the
+// "Two-factor authentication token:" prompt). Neither secret may ever appear
+// in argv, which is world-readable via /proc/<pid>/cmdline.
 func TestController_Connect_OTP_DeliversPasswordAndOTP(t *testing.T) {
 	executor := NewMockExecutor()
 	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
@@ -421,19 +423,97 @@ func TestController_Connect_OTP_DeliversPasswordAndOTP(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// OTP is delivered as a command-line flag.
-	args := executor.GetLastArgs()
-	assert.Contains(t, args, "--otp=123456", "OTP must be passed via the --otp flag")
-
-	// Password is delivered via stdin and must NEVER appear in argv.
-	for _, arg := range args {
+	// Neither credential may appear in argv.
+	for _, arg := range executor.GetLastArgs() {
 		assert.NotContains(t, arg, "topsecret", "password must never appear in command-line arguments")
+		assert.NotContains(t, arg, "123456", "OTP must never appear in command-line arguments")
 	}
+
+	// Both credentials are delivered via stdin, password first.
 	assert.Eventually(t, func() bool {
-		return executor.GetProcess().GetStdinContent() == "topsecret\n"
-	}, 100*time.Millisecond, 10*time.Millisecond, "password must be written to stdin")
+		return executor.GetProcess().GetStdinContent() == "topsecret\n123456\n"
+	}, 100*time.Millisecond, 10*time.Millisecond, "password then OTP must be written to stdin")
 
 	// Cleanup
+	executor.GetProcess().CompleteProcess()
+}
+
+// TestController_Connect_OTPWithoutPassword_DeliversOTP verifies that the OTP
+// still reaches stdin when no account password is supplied.
+func TestController_Connect_OTPWithoutPassword_DeliversOTP(t *testing.T) {
+	executor := NewMockExecutor()
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
+
+	p := &profile.Profile{
+		ID:         "550e8400-e29b-41d4-a716-446655440000",
+		Name:       "Test VPN",
+		Host:       "vpn.example.com",
+		Port:       443,
+		Username:   "testuser",
+		AuthMethod: profile.AuthMethodOTP,
+		SetDNS:     true,
+		SetRoutes:  true,
+	}
+
+	err := ctrl.Connect(context.Background(), p, &ConnectOptions{OTP: "654321"})
+	require.NoError(t, err)
+
+	assert.Eventually(t, func() bool {
+		return executor.GetProcess().GetStdinContent() == "654321\n"
+	}, 100*time.Millisecond, 10*time.Millisecond, "OTP must be written to stdin even without a password")
+
+	executor.GetProcess().CompleteProcess()
+}
+
+// TestController_OutputProcessing_LongLine verifies that output lines longer
+// than bufio.Scanner's 64 KiB default are still delivered instead of silently
+// killing the output-processing goroutine.
+//
+// Regression test: the scanners previously used the default buffer, so one
+// long line stopped all event parsing for the rest of the connection.
+func TestController_OutputProcessing_LongLine(t *testing.T) {
+	executor := NewMockExecutor()
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
+
+	// One line well past the 64 KiB default cap, followed by a parseable event.
+	longLine := strings.Repeat("x", 100*1024)
+	process := executor.GetProcess()
+	process.WriteToStdout(longLine)
+	process.WriteToStdout("Tunnel is up and running.")
+
+	var gotLong, gotTunnelUp bool
+	var mu sync.Mutex
+	ctrl.OnOutput(func(line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if line == longLine {
+			gotLong = true
+		}
+		if line == "Tunnel is up and running." {
+			gotTunnelUp = true
+		}
+	})
+
+	p := &profile.Profile{
+		ID:         "550e8400-e29b-41d4-a716-446655440000",
+		Name:       "Test VPN",
+		Host:       "vpn.example.com",
+		Port:       443,
+		Username:   "testuser",
+		AuthMethod: profile.AuthMethodPassword,
+		SetDNS:     true,
+		SetRoutes:  true,
+	}
+
+	require.NoError(t, ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "pw"}))
+
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return gotLong && gotTunnelUp
+	}, 2*time.Second, 10*time.Millisecond,
+		"long line and subsequent output must both be delivered")
+
 	executor.GetProcess().CompleteProcess()
 }
 

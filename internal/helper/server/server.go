@@ -13,6 +13,8 @@ import (
 	"os/user"
 	"strconv"
 	"sync"
+	"sync/atomic"
+	"syscall"
 
 	"github.com/shini4i/openfortivpn-gui/internal/helper/protocol"
 )
@@ -33,9 +35,11 @@ const (
 	maxConcurrentClients = 10
 )
 
-// RequestHandler is called for each incoming request.
-// It should return a response to send back to the client.
-type RequestHandler func(req *protocol.Request) *protocol.Response
+// RequestHandler is called for each incoming request. The clientID identifies
+// the connection the request arrived on, so handlers can scope follow-up
+// events to the requesting client. It should return a response to send back
+// to the client.
+type RequestHandler func(req *protocol.Request, clientID string) *protocol.Response
 
 // Server manages client connections over a UNIX socket.
 type Server struct {
@@ -45,10 +49,12 @@ type Server struct {
 	handler     RequestHandler
 
 	mu            sync.RWMutex
-	clients       map[*Client]struct{}
+	clients       map[string]*Client // keyed by client ID
 	running       bool
-	starting      bool              // Guards against TOCTOU race during Start()
-	connSemaphore chan struct{}     // Limits concurrent connections
+	starting      bool          // Guards against TOCTOU race during Start()
+	connSemaphore chan struct{} // Limits concurrent connections
+
+	nextClientID atomic.Uint64
 }
 
 // NewServer creates a new server instance with the default socket group.
@@ -66,7 +72,7 @@ func NewServerWithGroup(socketPath, socketGroup string, handler RequestHandler) 
 		socketPath:    socketPath,
 		socketGroup:   socketGroup,
 		handler:       handler,
-		clients:       make(map[*Client]struct{}),
+		clients:       make(map[string]*Client),
 		connSemaphore: make(chan struct{}, maxConcurrentClients),
 	}
 }
@@ -174,7 +180,7 @@ func (s *Server) Stop() error {
 	// Copy clients to slice while holding lock to avoid holding lock during Close() calls
 	// which could block and cause deadlock with other goroutines
 	clients := make([]*Client, 0, len(s.clients))
-	for client := range s.clients {
+	for _, client := range s.clients {
 		clients = append(clients, client)
 	}
 	s.mu.Unlock()
@@ -208,7 +214,7 @@ func (s *Server) Broadcast(event *protocol.Event) {
 	// Snapshot clients while holding the read lock
 	s.mu.RLock()
 	clients := make([]*Client, 0, len(s.clients))
-	for client := range s.clients {
+	for _, client := range s.clients {
 		clients = append(clients, client)
 	}
 	s.mu.RUnlock()
@@ -219,6 +225,22 @@ func (s *Server) Broadcast(event *protocol.Event) {
 			slog.Warn("Failed to send event to client", "error", err)
 		}
 	}
+}
+
+// SendToClient sends an event to the single client identified by clientID.
+// A client that has already disconnected is not an error — the event is
+// simply dropped, since there is no longer anyone to deliver it to.
+func (s *Server) SendToClient(clientID string, event *protocol.Event) error {
+	s.mu.RLock()
+	client, ok := s.clients[clientID]
+	s.mu.RUnlock()
+
+	if !ok {
+		slog.Debug("Dropping event for disconnected client", "client", clientID)
+		return nil
+	}
+
+	return client.SendEvent(event)
 }
 
 // ClientCount returns the number of connected clients.
@@ -246,8 +268,10 @@ func (s *Server) acceptLoop() {
 		select {
 		case s.connSemaphore <- struct{}{}:
 			// Acquired semaphore, proceed with client
-			client := newClient(conn)
+			clientID := fmt.Sprintf("client-%d", s.nextClientID.Add(1))
+			client := newClient(clientID, conn)
 			s.addClient(client)
+			logPeerCredentials(clientID, conn)
 			go s.handleClient(client)
 		default:
 			// Server at capacity, reject connection
@@ -262,15 +286,47 @@ func (s *Server) acceptLoop() {
 func (s *Server) addClient(client *Client) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.clients[client] = struct{}{}
-	slog.Info("Client connected", "clients", len(s.clients))
+	s.clients[client.ID()] = client
+	slog.Info("Client connected", "client", client.ID(), "clients", len(s.clients))
 }
 
 func (s *Server) removeClient(client *Client) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.clients, client)
-	slog.Info("Client disconnected", "clients", len(s.clients))
+	delete(s.clients, client.ID())
+	slog.Info("Client disconnected", "client", client.ID(), "clients", len(s.clients))
+}
+
+// logPeerCredentials logs the UID/GID/PID of the connecting peer via
+// SO_PEERCRED. The socket's group permission is the actual access-control
+// boundary; this exists purely for attribution, so a connection from an
+// unexpected user shows up in the helper's logs.
+func logPeerCredentials(clientID string, conn net.Conn) {
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return
+	}
+
+	raw, err := unixConn.SyscallConn()
+	if err != nil {
+		slog.Debug("Failed to get raw connection for peer credentials", "client", clientID, "error", err)
+		return
+	}
+
+	var cred *syscall.Ucred
+	var credErr error
+	if err := raw.Control(func(fd uintptr) {
+		cred, credErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	}); err != nil {
+		slog.Debug("Failed to read peer credentials", "client", clientID, "error", err)
+		return
+	}
+	if credErr != nil {
+		slog.Debug("Failed to read peer credentials", "client", clientID, "error", credErr)
+		return
+	}
+
+	slog.Info("Peer credentials", "client", clientID, "uid", cred.Uid, "gid", cred.Gid, "pid", cred.Pid)
 }
 
 func (s *Server) handleClient(client *Client) {
@@ -302,7 +358,7 @@ func (s *Server) handleClient(client *Client) {
 		}
 
 		// Handle the request
-		resp := s.handler(&req)
+		resp := s.handler(&req, client.ID())
 		if err := client.SendResponse(resp); err != nil {
 			slog.Error("Failed to send response", "error", err)
 			return
@@ -327,14 +383,21 @@ func (s *Server) handleClient(client *Client) {
 
 // Client represents a connected client.
 type Client struct {
+	id   string
 	conn net.Conn
 	mu   sync.Mutex
 }
 
-func newClient(conn net.Conn) *Client {
+func newClient(id string, conn net.Conn) *Client {
 	return &Client{
+		id:   id,
 		conn: conn,
 	}
+}
+
+// ID returns the server-assigned identifier for this client connection.
+func (c *Client) ID() string {
+	return c.id
 }
 
 // SendResponse sends a response to the client.

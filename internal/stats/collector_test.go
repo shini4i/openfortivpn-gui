@@ -166,6 +166,42 @@ func TestCollector_readInterfaceStats_InvalidInterface(t *testing.T) {
 }
 
 // TestCollector_collectAndEmit_EmptyInterface verifies no action when interface is empty.
+// TestCollector_CallbackPanic_DoesNotCorruptMutex verifies that a panicking
+// onStats callback propagates cleanly without leaving the collector's mutex
+// in a corrupted state.
+//
+// Regression test: collectAndEmit used to manually Unlock/Lock around the
+// callback while a deferred Unlock was still pending — a callback panic then
+// caused an unrecoverable "sync: unlock of unlocked mutex" fatal error that
+// crashed the whole application.
+func TestCollector_CallbackPanic_DoesNotCorruptMutex(t *testing.T) {
+	if _, err := os.Stat("/sys/class/net/lo/statistics/rx_bytes"); err != nil {
+		t.Skip("loopback sysfs statistics not available")
+	}
+
+	c := NewCollector(time.Second)
+	c.interfaceName = "lo"
+	c.lastTime = time.Now().Add(-time.Second)
+	c.stopChan = make(chan struct{})
+	c.onStats = func(NetworkStats) { panic("callback exploded") }
+
+	assert.PanicsWithValue(t, "callback exploded", func() {
+		c.collectAndEmit(c.stopChan)
+	})
+
+	// The mutex must still be usable: Stop must neither deadlock nor panic.
+	done := make(chan struct{})
+	go func() {
+		c.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("collector mutex corrupted: Stop deadlocked after callback panic")
+	}
+}
+
 func TestCollector_collectAndEmit_EmptyInterface(t *testing.T) {
 	c := NewCollector(time.Second)
 	c.interfaceName = ""
