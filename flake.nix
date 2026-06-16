@@ -16,6 +16,7 @@
           nativeBuildInputs = with pkgs; [
             go_1_25
             go-task
+            goreleaser
             pkg-config
             gobject-introspection
             golangci-lint

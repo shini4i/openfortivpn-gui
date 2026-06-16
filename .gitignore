@@ -2,6 +2,9 @@
 /openfortivpn-gui
 /openfortivpn-gui-helper
 
+# GoReleaser output
+/dist/
+
 # Test coverage
 coverage.out
 coverage.html

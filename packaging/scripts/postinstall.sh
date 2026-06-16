@@ -18,6 +18,16 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
 fi
 
+# Refresh the icon cache so the app icon shows up immediately
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+
+# Refresh the desktop database so the .desktop entry is picked up
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+
 # Print post-install instructions (no auto-enable for security)
 echo ""
 echo "openfortivpn-gui installed successfully."
