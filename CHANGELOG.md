@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The system tray icon now uses the application's shield artwork instead of a
+  generic padlock, and recolors it by connection status (gray when
+  disconnected, orange while connecting, green when connected).
+
 ### Fixed
 
 - Enforce a minimum 1-second reconnect delay so that exponential backoff and
