@@ -24,11 +24,12 @@ const (
 
 // reconnectDelay returns the delay before the given attempt (1-based):
 // exponential backoff (base * 2^(attempt-1)) capped at maxReconnectDelay,
-// with ±reconnectJitterFraction random jitter. A non-positive base returns
-// zero, preserving immediate-reconnect configurations.
+// with ±reconnectJitterFraction random jitter. A non-positive base defaults
+// to 1 second so that jitter always applies and reconnects are never
+// instantaneous.
 func reconnectDelay(base time.Duration, attempt int) time.Duration {
 	if base <= 0 {
-		return 0
+		base = time.Second
 	}
 	if attempt < 1 {
 		attempt = 1

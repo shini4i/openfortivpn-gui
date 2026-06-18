@@ -197,11 +197,15 @@ func TestReconnectDelay_ExponentialBackoffWithJitter(t *testing.T) {
 	}
 }
 
-// TestReconnectDelay_ZeroBase verifies a zero base delay stays zero — tests
-// and configurations relying on immediate reconnect must keep working.
+// TestReconnectDelay_ZeroBase verifies a zero base delay defaults to 1 second
+// so that reconnects are never instantaneous and jitter always applies.
 func TestReconnectDelay_ZeroBase(t *testing.T) {
-	assert.Equal(t, time.Duration(0), reconnectDelay(0, 1))
-	assert.Equal(t, time.Duration(0), reconnectDelay(0, 5))
+	got := reconnectDelay(0, 1)
+	// With jitter: 1s ± 20% → [0.8s, 1.2s]
+	lo := time.Duration(float64(time.Second) * (1 - reconnectJitterFraction))
+	hi := time.Duration(float64(time.Second) * (1 + reconnectJitterFraction))
+	assert.GreaterOrEqual(t, got, lo)
+	assert.LessOrEqual(t, got, hi)
 }
 
 func TestManager_StartReconnect(t *testing.T) {
@@ -210,7 +214,7 @@ func TestManager_StartReconnect(t *testing.T) {
 		close(scheduled)
 	}
 
-	cfg := Config{MaxAttempts: 3, DelaySeconds: 0} // 0 delay for testing
+	cfg := Config{MaxAttempts: 3, DelaySeconds: 1} // 1s delay; reconnectDelay enforces ≥1s minimum
 	m := NewManager(cfg, scheduleOnMain)
 	m.lastConnectedProfile = &profile.Profile{
 		ID:   "test-id",
@@ -221,11 +225,11 @@ func TestManager_StartReconnect(t *testing.T) {
 
 	assert.Equal(t, 1, m.attemptCount)
 
-	// Wait for timer to fire
+	// Wait for timer to fire (reconnectDelay adds jitter; 3s is conservative)
 	select {
 	case <-scheduled:
 		// Success - scheduleOnMain was called
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(3 * time.Second):
 		t.Fatal("scheduleOnMain was not called within timeout")
 	}
 }

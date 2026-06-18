@@ -119,8 +119,9 @@ func (c *Config) Validate() error {
 	if c.MaxReconnectAttempts < 0 {
 		return fmt.Errorf("max reconnect attempts must be non-negative")
 	}
-	// OpenFortiVPNPath is validated at runtime (exec.LookPath in app.go)
-	// but we ensure it's not empty as a basic sanity check
+	// OpenFortiVPNPath must be non-empty at config level. The actual binary
+	// existence is checked once at startup via exec.LookPath in app.go — a
+	// missing binary warns but does not prevent the app from starting.
 	if c.OpenFortiVPNPath == "" {
 		return fmt.Errorf("openfortivpn path must not be empty")
 	}

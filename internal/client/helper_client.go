@@ -12,6 +12,7 @@ import (
 	"net"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -372,10 +373,16 @@ func (c *HelperClient) handleMessage(data []byte) {
 		c.handleEvent(&event)
 
 	default:
-		// Log unknown message types for debugging (forward compatibility)
+		// Log unknown message types for debugging (forward compatibility).
+		// Truncate at a rune boundary to avoid splitting multi-byte UTF-8
+		// characters, which would produce invalid UTF-8 in structured logs.
 		truncatedData := string(data)
 		if len(truncatedData) > 200 {
-			truncatedData = truncatedData[:200] + "..."
+			s := truncatedData[:200]
+			for len(s) > 0 && !utf8.ValidString(s) {
+				s = s[:len(s)-1]
+			}
+			truncatedData = s + "..."
 		}
 		slog.Warn("Unknown message type from helper",
 			"type", msg.Type,
