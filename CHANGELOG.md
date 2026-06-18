@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Enforce a minimum 1-second reconnect delay so that exponential backoff and
+  jitter are always applied, even when the config has a zero or negative value
+  for `reconnect_delay_seconds`.
+- Fix a potential invalid UTF-8 byte in structured logs when the helper daemon
+  sends an unknown protocol message longer than 200 bytes.
+
 ## [0.3.4] - 2026-06-16
 
 ### Added
