@@ -16,19 +16,35 @@ import (
 // hue and saturation of these colors are used; each source pixel keeps its own
 // brightness (then scaled — see below) so the shield retains its shading gradient.
 var (
-	colorDisconnected = color.RGBA{128, 128, 128, 255} // muted gray
+	colorDisconnected = color.RGBA{120, 120, 120, 255} // muted gray
 	colorConnecting   = color.RGBA{255, 140, 0, 255}   // orange
-	colorConnected    = color.RGBA{20, 160, 30, 255}   // saturated green
+	colorConnected    = color.RGBA{0, 200, 60, 255}    // vivid green
 )
 
-// Per-state brightness scale (<1 darkens). The source shield is bright, so a
-// straight hue swap left the gray "disconnected" icon near-white and the green
-// "connected" icon pale — at tray size the two were nearly indistinguishable.
-// Dimming disconnected and using a deeper, saturated green pulls them apart.
+// Per-state brightness scale (<1 darkens). A straight hue swap left the gray
+// "disconnected" and green "connected" shields at nearly the same luminance, and
+// the eye resolves luminance — not hue — at tray size, so the two states read as
+// the same shield in a different tint. Pulling disconnected far darker and
+// keeping connected at full, vivid brightness opens a clear luminance gap. The
+// disconnected icon additionally carries a disabled slash (see drawDisabledSlash)
+// so the states differ in shape, not only color.
 const (
-	scaleDisconnected = 0.50 // darken so "off" reads as muted, not white
+	scaleDisconnected = 0.28 // push "off" dark so it can't be mistaken for "on"
 	scaleConnecting   = 1.00 // keep the original brightness
-	scaleConnected    = 0.90 // slightly deepen the green
+	scaleConnected    = 1.00 // bright, vivid green
+)
+
+// Disabled-slash geometry and colors, as fractions of the icon width. The slash
+// is a dark diagonal line with a thin white halo, clipped to the shield
+// silhouette.
+const (
+	slashHalfFrac = 0.07  // slash half-thickness as a fraction of icon width
+	slashHaloFrac = 0.045 // extra white halo width beyond the slash
+)
+
+var (
+	slashColor = color.NRGBA{60, 60, 60, 255}    // near-black line
+	slashHalo  = color.NRGBA{255, 255, 255, 255} // white outline so it reads on any tint
 )
 
 // Pre-generated PNG icons for different connection states, derived from the
@@ -52,7 +68,7 @@ func init() {
 		return
 	}
 
-	iconDisconnectedPNG = recolorShield(src, colorDisconnected, scaleDisconnected)
+	iconDisconnectedPNG = drawDisabledSlash(recolorShield(src, colorDisconnected, scaleDisconnected))
 	iconConnectingPNG = recolorShield(src, colorConnecting, scaleConnecting)
 	iconConnectedPNG = recolorShield(src, colorConnected, scaleConnected)
 
@@ -106,6 +122,58 @@ func recolorShield(src image.Image, target color.RGBA, valueScale float64) []byt
 	if err := png.Encode(&buf, out); err != nil {
 		slog.Error("failed to encode recolored shield icon", "error", err)
 		return nil
+	}
+	return buf.Bytes()
+}
+
+// drawDisabledSlash overlays a diagonal "disabled" slash — a dark line with a
+// thin white halo — across the icon's non-transparent pixels. Color alone is a
+// weak cue at tray size, where green and gray shields read as nearly the same
+// brightness, so the slash gives the disconnected state a shape-level marker
+// that stays legible in grayscale and for color-blind users. The line runs from
+// the top-right to the bottom-left and is clipped to the shield silhouette so it
+// never streaks across the transparent corners. The line geometry assumes a
+// square icon (the embedded shield is 48x48); for a non-square bounds the slash
+// would run off-center. Returns pngData unchanged if it cannot be decoded, and
+// nil if pngData is nil, so init's nil-guard still yields an icon.
+func drawDisabledSlash(pngData []byte) []byte {
+	if pngData == nil {
+		return nil
+	}
+
+	src, err := png.Decode(bytes.NewReader(pngData))
+	if err != nil {
+		slog.Error("failed to decode icon for disabled slash", "error", err)
+		return pngData
+	}
+
+	b := src.Bounds()
+	out := image.NewNRGBA(b)
+	draw.Draw(out, b, src, b.Min, draw.Src)
+
+	w := float64(b.Dx())
+	half := w * slashHalfFrac
+	halo := half + w*slashHaloFrac
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if out.NRGBAAt(x, y).A == 0 {
+				continue // keep the slash inside the shield silhouette
+			}
+			// Distance from the pixel to the line (x-min)+(y-min) = w.
+			dist := math.Abs(float64(x-b.Min.X)+float64(y-b.Min.Y)-w) / math.Sqrt2
+			switch {
+			case dist <= half:
+				out.SetNRGBA(x, y, slashColor)
+			case dist <= halo:
+				out.SetNRGBA(x, y, slashHalo)
+			}
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, out); err != nil {
+		slog.Error("failed to encode slashed icon", "error", err)
+		return pngData
 	}
 	return buf.Bytes()
 }

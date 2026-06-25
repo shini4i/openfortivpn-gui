@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -264,6 +265,9 @@ func TestRecolorShield_ValueScale(t *testing.T) {
 
 	clamped := decodeNRGBA(t, recolorShield(src, colorConnected, 2.0))
 	assert.InDelta(t, 255, maxChannel(clamped.NRGBAAt(0, 0)), 1, "scale must clamp at full brightness")
+
+	dark := decodeNRGBA(t, recolorShield(src, colorConnected, -1.0))
+	assert.InDelta(t, 0, maxChannel(dark.NRGBAAt(0, 0)), 1, "negative scale must clamp to 0 (fully dark)")
 }
 
 // TestStateIcons_AreDistinguishable pins the fix: across the shield body, the
@@ -305,6 +309,83 @@ func TestStateIcons_AreDistinguishable(t *testing.T) {
 	// don't both read as a light shield. Margin is generous to avoid brittleness.
 	assert.Less(t, discMean, connMean*0.75, "disconnected body should be clearly darker than connected (disc=%.1f conn=%.1f)", discMean, connMean)
 	assert.GreaterOrEqual(t, greenDominant, bodyPixels*9/10, "connected body should read as green")
+}
+
+// TestDrawDisabledSlash verifies the disabled slash is drawn across the icon's
+// diagonal and clipped to the shield silhouette: a pixel on the diagonal inside
+// the shield becomes the dark slash color, while a shield pixel well off the
+// diagonal is left untouched.
+func TestDrawDisabledSlash(t *testing.T) {
+	src, err := png.Decode(bytes.NewReader(assets.ShieldIconPNG))
+	require.NoError(t, err)
+
+	base := recolorShield(src, colorDisconnected, scaleDisconnected)
+	require.NotNil(t, base)
+
+	out := drawDisabledSlash(base)
+	require.NotNil(t, out)
+
+	img := decodeNRGBA(t, out)
+	baseImg := decodeNRGBA(t, base)
+	b := img.Bounds()
+	assert.Equal(t, baseImg.Bounds(), b, "slash must preserve dimensions")
+
+	// The center sits on the top-right -> bottom-left diagonal and inside the
+	// shield, so it must carry the dark, neutral-gray slash color.
+	cx := b.Min.X + b.Dx()/2
+	cy := b.Min.Y + b.Dy()/2
+	center := img.NRGBAAt(cx, cy)
+	assert.Equal(t, uint8(255), center.A, "slash pixel must be opaque")
+	assert.Less(t, int(maxChannel(center)), 90, "diagonal pixel should be darkened by the slash")
+	assert.LessOrEqual(t, int(absDiff(center.R, center.G)), 4, "slash should be neutral gray")
+	assert.LessOrEqual(t, int(absDiff(center.G, center.B)), 4, "slash should be neutral gray")
+
+	// A shield pixel well off the diagonal must be identical to the un-slashed base.
+	offX, offY := b.Min.X+b.Dx()/2, b.Min.Y+b.Dy()/4 // top-center: far from the line
+	assert.Equal(t, baseImg.NRGBAAt(offX, offY), img.NRGBAAt(offX, offY), "pixels off the slash must be unchanged")
+
+	// Pin the two load-bearing invariants directly: every opaque pixel in the
+	// halo band is painted white, and the slash never paints over a transparent
+	// pixel on the diagonal (so it stays clipped to the shield silhouette).
+	w := float64(b.Dx())
+	half := w * slashHalfFrac
+	halo := half + w*slashHaloFrac
+	var haloChecked, clipChecked int
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			dist := math.Abs(float64(x-b.Min.X)+float64(y-b.Min.Y)-w) / math.Sqrt2
+			base := baseImg.NRGBAAt(x, y)
+			switch {
+			case base.A == 0 && dist <= half:
+				assert.Equal(t, uint8(0), img.NRGBAAt(x, y).A, "slash must not streak across transparent corner at (%d,%d)", x, y)
+				clipChecked++
+			case base.A != 0 && dist > half && dist <= halo:
+				assert.Equal(t, slashHalo, img.NRGBAAt(x, y), "halo band pixel must be white at (%d,%d)", x, y)
+				haloChecked++
+			}
+		}
+	}
+	require.Greater(t, haloChecked, 0, "sanity: the halo band must be exercised")
+	require.Greater(t, clipChecked, 0, "sanity: a transparent on-diagonal pixel must be exercised")
+}
+
+// TestDrawDisabledSlash_NilAndInvalid pins the init-fallback contract: nil in
+// yields nil out (so the existing nil-guard substitutes the raw artwork), and
+// undecodable input is returned unchanged rather than dropped.
+func TestDrawDisabledSlash_NilAndInvalid(t *testing.T) {
+	assert.Nil(t, drawDisabledSlash(nil), "nil in -> nil out for the init fallback")
+	garbage := []byte("not a png")
+	assert.Equal(t, garbage, drawDisabledSlash(garbage), "undecodable input returned unchanged")
+}
+
+// TestDisconnectedIcon_HasSlash pins that the pre-generated disconnected icon
+// carries the disabled slash — the shape cue that distinguishes it from the
+// connected icon independent of color (and survives grayscale).
+func TestDisconnectedIcon_HasSlash(t *testing.T) {
+	img := decodeNRGBA(t, iconDisconnectedPNG)
+	b := img.Bounds()
+	center := img.NRGBAAt(b.Min.X+b.Dx()/2, b.Min.Y+b.Dy()/2)
+	assert.Less(t, int(maxChannel(center)), 90, "disconnected icon center should sit under the dark slash")
 }
 
 func TestIsBlueDominant(t *testing.T) {
