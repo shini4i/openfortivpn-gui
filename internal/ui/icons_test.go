@@ -49,7 +49,7 @@ func TestRecolorShield_ReturnsValidPNG(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data := recolorShield(src, tt.color)
+			data := recolorShield(src, tt.color, 1.0)
 			require.NotNil(t, data, "icon data should not be nil")
 			assert.NotEmpty(t, data, "icon data should not be empty")
 
@@ -72,9 +72,9 @@ func TestRecolorShield_ShiftsBluePixels(t *testing.T) {
 	src := image.NewNRGBA(b)
 	draw.Draw(src, b, srcImg, b.Min, draw.Src)
 
-	connected := decodeNRGBA(t, recolorShield(srcImg, colorConnected))
-	connecting := decodeNRGBA(t, recolorShield(srcImg, colorConnecting))
-	disconnected := decodeNRGBA(t, recolorShield(srcImg, colorDisconnected))
+	connected := decodeNRGBA(t, recolorShield(srcImg, colorConnected, 1.0))
+	connecting := decodeNRGBA(t, recolorShield(srcImg, colorConnecting, 1.0))
+	disconnected := decodeNRGBA(t, recolorShield(srcImg, colorDisconnected, 1.0))
 
 	var blueCount, greenOK, orangeOK, grayOK, whitePreserved, whiteCount int
 	for y := b.Min.Y; y < b.Max.Y; y++ {
@@ -204,7 +204,7 @@ func TestHSVRoundTrip(t *testing.T) {
 
 func TestRecolorShield_NilSource(t *testing.T) {
 	// The init() fallback relies on this nil contract.
-	assert.Nil(t, recolorShield(nil, colorConnected))
+	assert.Nil(t, recolorShield(nil, colorConnected, 1.0))
 }
 
 // TestRecolorShield_SyntheticImage pins the recolor's defining properties on a
@@ -217,7 +217,7 @@ func TestRecolorShield_SyntheticImage(t *testing.T) {
 	src.SetNRGBA(1, 0, color.NRGBA{R: 30, G: 30, B: 200, A: 255})  // blue, brightness = 200/255
 	src.SetNRGBA(2, 0, color.NRGBA{R: 240, G: 240, B: 240, A: 200}) // white bar, partial alpha
 
-	out := decodeNRGBA(t, recolorShield(src, colorConnected))
+	out := decodeNRGBA(t, recolorShield(src, colorConnected, 1.0))
 
 	// Transparent source pixel remains transparent.
 	assert.Equal(t, uint8(0), out.NRGBAAt(0, 0).A, "transparent pixel must stay transparent")
@@ -238,6 +238,73 @@ func TestRecolorShield_SyntheticImage(t *testing.T) {
 
 	// White bar pixel (incl. partial alpha) must be byte-identical.
 	assert.Equal(t, color.NRGBA{R: 240, G: 240, B: 240, A: 200}, out.NRGBAAt(2, 0), "non-blue pixel must be untouched")
+}
+
+// maxChannel returns the largest of a pixel's RGB channels (its HSV "value").
+func maxChannel(p color.NRGBA) uint8 {
+	m := p.R
+	if p.G > m {
+		m = p.G
+	}
+	if p.B > m {
+		m = p.B
+	}
+	return m
+}
+
+// TestRecolorShield_ValueScale verifies valueScale darkens recolored pixels:
+// halving the scale halves a body pixel's brightness, and the scale is clamped
+// so it can never brighten past the source value.
+func TestRecolorShield_ValueScale(t *testing.T) {
+	src := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	src.SetNRGBA(0, 0, color.NRGBA{R: 30, G: 30, B: 200, A: 255}) // blue, brightness 200
+
+	half := decodeNRGBA(t, recolorShield(src, colorConnected, 0.5))
+	assert.InDelta(t, 100, maxChannel(half.NRGBAAt(0, 0)), 2, "scale 0.5 should halve brightness")
+
+	clamped := decodeNRGBA(t, recolorShield(src, colorConnected, 2.0))
+	assert.InDelta(t, 255, maxChannel(clamped.NRGBAAt(0, 0)), 1, "scale must clamp at full brightness")
+}
+
+// TestStateIcons_AreDistinguishable pins the fix: across the shield body, the
+// disconnected icon must be clearly darker than the connected one, and the
+// connected body must read as green. This is what keeps the two states apart at
+// tray size — a regression here is the original "white vs pale-green" bug.
+func TestStateIcons_AreDistinguishable(t *testing.T) {
+	srcImg, err := png.Decode(bytes.NewReader(assets.ShieldIconPNG))
+	require.NoError(t, err)
+	b := srcImg.Bounds()
+	src := image.NewNRGBA(b)
+	draw.Draw(src, b, srcImg, b.Min, draw.Src)
+
+	disconnected := decodeNRGBA(t, iconDisconnectedPNG)
+	connected := decodeNRGBA(t, iconConnectedPNG)
+
+	var bodyPixels, discSum, connSum, greenDominant int
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			p := src.NRGBAAt(x, y)
+			if p.A == 0 || !isBlueDominant(p.R, p.G, p.B) {
+				continue
+			}
+			bodyPixels++
+			discSum += int(maxChannel(disconnected.NRGBAAt(x, y)))
+			cp := connected.NRGBAAt(x, y)
+			connSum += int(maxChannel(cp))
+			if cp.G > cp.R && cp.G > cp.B {
+				greenDominant++
+			}
+		}
+	}
+
+	require.Greater(t, bodyPixels, 100, "sanity: source must contain shield-body pixels")
+	discMean := float64(discSum) / float64(bodyPixels)
+	connMean := float64(connSum) / float64(bodyPixels)
+
+	// Disconnected must be substantially dimmer than connected so the two states
+	// don't both read as a light shield. Margin is generous to avoid brittleness.
+	assert.Less(t, discMean, connMean*0.75, "disconnected body should be clearly darker than connected (disc=%.1f conn=%.1f)", discMean, connMean)
+	assert.GreaterOrEqual(t, greenDominant, bodyPixels*9/10, "connected body should read as green")
 }
 
 func TestIsBlueDominant(t *testing.T) {

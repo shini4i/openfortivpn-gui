@@ -14,11 +14,21 @@ import (
 
 // Status colors applied to the shield body for each connection state. Only the
 // hue and saturation of these colors are used; each source pixel keeps its own
-// brightness so the shield retains its original shading gradient.
+// brightness (then scaled — see below) so the shield retains its shading gradient.
 var (
-	colorDisconnected = color.RGBA{128, 128, 128, 255} // gray
+	colorDisconnected = color.RGBA{128, 128, 128, 255} // muted gray
 	colorConnecting   = color.RGBA{255, 140, 0, 255}   // orange
-	colorConnected    = color.RGBA{76, 175, 80, 255}   // green
+	colorConnected    = color.RGBA{20, 160, 30, 255}   // saturated green
+)
+
+// Per-state brightness scale (<1 darkens). The source shield is bright, so a
+// straight hue swap left the gray "disconnected" icon near-white and the green
+// "connected" icon pale — at tray size the two were nearly indistinguishable.
+// Dimming disconnected and using a deeper, saturated green pulls them apart.
+const (
+	scaleDisconnected = 0.50 // darken so "off" reads as muted, not white
+	scaleConnecting   = 1.00 // keep the original brightness
+	scaleConnected    = 0.90 // slightly deepen the green
 )
 
 // Pre-generated PNG icons for different connection states, derived from the
@@ -42,9 +52,9 @@ func init() {
 		return
 	}
 
-	iconDisconnectedPNG = recolorShield(src, colorDisconnected)
-	iconConnectingPNG = recolorShield(src, colorConnecting)
-	iconConnectedPNG = recolorShield(src, colorConnected)
+	iconDisconnectedPNG = recolorShield(src, colorDisconnected, scaleDisconnected)
+	iconConnectingPNG = recolorShield(src, colorConnecting, scaleConnecting)
+	iconConnectedPNG = recolorShield(src, colorConnected, scaleConnected)
 
 	// Guard against an unexpected encode failure: fall back to the raw artwork
 	// so the tray never receives a nil icon.
@@ -58,8 +68,10 @@ func init() {
 // recolorShield returns a PNG of the shield icon with its blue body shifted
 // toward target. The white window bars (and any other non-blue pixel) and the
 // per-pixel alpha are preserved, so only the shield's color changes while its
-// shape and shading stay intact. Returns nil if src is nil or encoding fails.
-func recolorShield(src image.Image, target color.RGBA) []byte {
+// shape and shading stay intact. valueScale multiplies each recolored pixel's
+// brightness (clamped to [0, 1]), letting a state darken the shield body so states
+// stay distinguishable at tray size. Returns nil if src is nil or encoding fails.
+func recolorShield(src image.Image, target color.RGBA, valueScale float64) []byte {
 	if src == nil {
 		return nil
 	}
@@ -81,6 +93,7 @@ func recolorShield(src image.Image, target color.RGBA) []byte {
 			}
 			if isBlueDominant(p.R, p.G, p.B) {
 				_, _, v := rgbToHSV(p.R, p.G, p.B)
+				v = math.Max(0, math.Min(1, v*valueScale)) // keep V within the HSV domain
 				r, g, bl := hsvToRGB(th, ts, v)
 				out.SetNRGBA(x, y, color.NRGBA{R: r, G: g, B: bl, A: p.A})
 			} else {
