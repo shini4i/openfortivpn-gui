@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-06-28
+
 ### Changed
 
 - The system tray icon is now a clean hollow shield outline that changes color
@@ -42,5 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`NoNewPrivileges`, namespace/syscall/address-family restrictions,
   `MemoryDenyWriteExecute`, and related protections).
 
-[Unreleased]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.3...v0.3.4
