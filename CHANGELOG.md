@@ -9,12 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The system tray icon now uses the application's shield artwork instead of a
-  generic padlock, and recolors it by connection status (gray when
-  disconnected, orange while connecting, green when connected). The
-  disconnected icon is rendered dark with a diagonal "disabled" slash and the
-  connected icon a vivid green, so the two states stay distinguishable at tray
-  size even in grayscale or for color-blind users.
+- The system tray icon is now a clean hollow shield outline that changes color
+  by connection status — gray when disconnected, orange while connecting, green
+  when connected — replacing the previous generic padlock. The minimal outline
+  stays sharp and legible at small tray sizes, where the detailed shield artwork
+  blurred into an unreadable smudge.
 
 ### Fixed
 

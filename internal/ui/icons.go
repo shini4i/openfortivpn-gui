@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"image"
 	"image/color"
-	"image/draw"
 	"image/png"
 	"log/slog"
 	"math"
@@ -12,43 +11,29 @@ import (
 	"github.com/shini4i/openfortivpn-gui/assets"
 )
 
-// Status colors applied to the shield body for each connection state. Only the
-// hue and saturation of these colors are used; each source pixel keeps its own
-// brightness (then scaled — see below) so the shield retains its shading gradient.
+// Status colors for the tray shield outline. With the icon reduced to a hollow
+// outline, the color alone carries the connection state, so the three must stay
+// well separated: a desaturated gray, a saturated orange, and a vivid green.
 var (
-	colorDisconnected = color.RGBA{120, 120, 120, 255} // muted gray
+	colorDisconnected = color.RGBA{120, 120, 120, 255} // neutral gray
 	colorConnecting   = color.RGBA{255, 140, 0, 255}   // orange
 	colorConnected    = color.RGBA{0, 200, 60, 255}    // vivid green
 )
 
-// Per-state brightness scale (<1 darkens). A straight hue swap left the gray
-// "disconnected" and green "connected" shields at nearly the same luminance, and
-// the eye resolves luminance — not hue — at tray size, so the two states read as
-// the same shield in a different tint. Pulling disconnected far darker and
-// keeping connected at full, vivid brightness opens a clear luminance gap. The
-// disconnected icon additionally carries a disabled slash (see drawDisabledSlash)
-// so the states differ in shape, not only color.
+// Shield geometry and rendering parameters. The earlier tray icons recolored the
+// detailed application artwork (a blue shield with a window grid and key); at
+// tray size all that detail collapsed into an unreadable smudge. Instead we draw
+// a clean hollow shield from scratch — a thick colored outline around an empty
+// center — so the only thing the eye has to resolve is the outline's color.
 const (
-	scaleDisconnected = 0.28 // push "off" dark so it can't be mistaken for "on"
-	scaleConnecting   = 1.00 // keep the original brightness
-	scaleConnected    = 1.00 // bright, vivid green
+	iconSize      = 64   // render resolution; tray hosts downscale this to the panel size
+	iconMargin    = 0.06 // transparent padding around the shield, as a fraction of the canvas
+	innerScale    = 0.74 // inner shield as a fraction of the outer; the gap between them is the stroke
+	shieldCenterY = 0.46 // the point the inner shield shrinks toward (the silhouette's rough centroid)
+	supersample   = 4    // sub-samples per axis per pixel, for anti-aliased edges
 )
 
-// Disabled-slash geometry and colors, as fractions of the icon width. The slash
-// is a dark diagonal line with a thin white halo, clipped to the shield
-// silhouette.
-const (
-	slashHalfFrac = 0.07  // slash half-thickness as a fraction of icon width
-	slashHaloFrac = 0.045 // extra white halo width beyond the slash
-)
-
-var (
-	slashColor = color.NRGBA{60, 60, 60, 255}    // near-black line
-	slashHalo  = color.NRGBA{255, 255, 255, 255} // white outline so it reads on any tint
-)
-
-// Pre-generated PNG icons for different connection states, derived from the
-// application shield artwork.
+// Pre-generated PNG icons for each connection state.
 var (
 	iconDisconnectedPNG []byte
 	iconConnectingPNG   []byte
@@ -56,24 +41,13 @@ var (
 )
 
 func init() {
-	src, err := png.Decode(bytes.NewReader(assets.ShieldIconPNG))
-	if err != nil {
-		// The icon is embedded at build time, so a decode failure is a
-		// programming error rather than a runtime condition. Fall back to the
-		// raw artwork for every state so the tray still shows something.
-		slog.Error("failed to decode embedded shield icon", "error", err)
-		iconDisconnectedPNG = assets.ShieldIconPNG
-		iconConnectingPNG = assets.ShieldIconPNG
-		iconConnectedPNG = assets.ShieldIconPNG
-		return
-	}
+	iconDisconnectedPNG = drawShieldOutline(iconSize, colorDisconnected)
+	iconConnectingPNG = drawShieldOutline(iconSize, colorConnecting)
+	iconConnectedPNG = drawShieldOutline(iconSize, colorConnected)
 
-	iconDisconnectedPNG = drawDisabledSlash(recolorShield(src, colorDisconnected, scaleDisconnected))
-	iconConnectingPNG = recolorShield(src, colorConnecting, scaleConnecting)
-	iconConnectedPNG = recolorShield(src, colorConnected, scaleConnected)
-
-	// Guard against an unexpected encode failure: fall back to the raw artwork
-	// so the tray never receives a nil icon.
+	// Encoding an in-memory image effectively never fails, but if it somehow
+	// does, fall back to the embedded application artwork so the tray never
+	// receives a nil icon.
 	for _, icon := range []*[]byte{&iconDisconnectedPNG, &iconConnectingPNG, &iconConnectedPNG} {
 		if *icon == nil {
 			*icon = assets.ShieldIconPNG
@@ -81,175 +55,88 @@ func init() {
 	}
 }
 
-// recolorShield returns a PNG of the shield icon with its blue body shifted
-// toward target. The white window bars (and any other non-blue pixel) and the
-// per-pixel alpha are preserved, so only the shield's color changes while its
-// shape and shading stay intact. valueScale multiplies each recolored pixel's
-// brightness (clamped to [0, 1]), letting a state darken the shield body so states
-// stay distinguishable at tray size. Returns nil if src is nil or encoding fails.
-func recolorShield(src image.Image, target color.RGBA, valueScale float64) []byte {
-	if src == nil {
-		return nil
-	}
+// drawShieldOutline renders a hollow shield — a thick colored outline around a
+// transparent center — as a size×size PNG. The painted band is the region inside
+// the shield silhouette but outside an inner shield shrunk by innerScale toward
+// shieldCenterY; only that band is filled with col, so the connection state is
+// conveyed by the outline color alone and stays legible at any tray size. Each
+// pixel is supersampled so the curved edges are anti-aliased. Returns nil if PNG
+// encoding fails, which lets init substitute a fallback icon.
+func drawShieldOutline(size int, col color.RGBA) []byte {
+	img := image.NewNRGBA(image.Rect(0, 0, size, size))
+	span := 1 - 2*iconMargin // the drawing area inside the transparent margin
 
-	b := src.Bounds()
-	// Normalize to straight-alpha NRGBA so anti-aliased edge pixels are read as
-	// un-premultiplied colors (premultiplied values would darken recolored edges).
-	in := image.NewNRGBA(b)
-	draw.Draw(in, b, src, b.Min, draw.Src)
+	for py := 0; py < size; py++ {
+		for px := 0; px < size; px++ {
+			var hits int
+			for sy := 0; sy < supersample; sy++ {
+				for sx := 0; sx < supersample; sx++ {
+					// Sub-pixel sample center, in [0,1) canvas coordinates.
+					cx := (float64(px) + (float64(sx)+0.5)/supersample) / float64(size)
+					cy := (float64(py) + (float64(sy)+0.5)/supersample) / float64(size)
+					// Map the drawing area (inside the margin) onto the unit shield.
+					nx := (cx - iconMargin) / span
+					ny := (cy - iconMargin) / span
 
-	th, ts, _ := rgbToHSV(target.R, target.G, target.B)
-
-	out := image.NewNRGBA(b) // zero value is fully transparent
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			p := in.NRGBAAt(x, y)
-			if p.A == 0 {
+					inner := inShield((nx-0.5)/innerScale+0.5, (ny-shieldCenterY)/innerScale+shieldCenterY)
+					if inShield(nx, ny) && !inner {
+						hits++
+					}
+				}
+			}
+			if hits == 0 {
 				continue
 			}
-			if isBlueDominant(p.R, p.G, p.B) {
-				_, _, v := rgbToHSV(p.R, p.G, p.B)
-				v = math.Max(0, math.Min(1, v*valueScale)) // keep V within the HSV domain
-				r, g, bl := hsvToRGB(th, ts, v)
-				out.SetNRGBA(x, y, color.NRGBA{R: r, G: g, B: bl, A: p.A})
-			} else {
-				out.SetNRGBA(x, y, p)
-			}
+			// Coverage fraction becomes the pixel's alpha; the RGB is always the
+			// state color, so every painted pixel reads as that single color.
+			a := uint8(hits * 255 / (supersample * supersample))
+			img.SetNRGBA(px, py, color.NRGBA{R: col.R, G: col.G, B: col.B, A: a})
 		}
 	}
 
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, out); err != nil {
-		slog.Error("failed to encode recolored shield icon", "error", err)
+	if err := png.Encode(&buf, img); err != nil {
+		slog.Error("failed to encode shield outline icon", "error", err)
 		return nil
 	}
 	return buf.Bytes()
 }
 
-// drawDisabledSlash overlays a diagonal "disabled" slash — a dark line with a
-// thin white halo — across the icon's non-transparent pixels. Color alone is a
-// weak cue at tray size, where green and gray shields read as nearly the same
-// brightness, so the slash gives the disconnected state a shape-level marker
-// that stays legible in grayscale and for color-blind users. The line runs from
-// the top-right to the bottom-left and is clipped to the shield silhouette so it
-// never streaks across the transparent corners. The line geometry assumes a
-// square icon (the embedded shield is 48x48); for a non-square bounds the slash
-// would run off-center. Returns pngData unchanged if it cannot be decoded, and
-// nil if pngData is nil, so init's nil-guard still yields an icon.
-func drawDisabledSlash(pngData []byte) []byte {
-	if pngData == nil {
-		return nil
-	}
-
-	src, err := png.Decode(bytes.NewReader(pngData))
-	if err != nil {
-		slog.Error("failed to decode icon for disabled slash", "error", err)
-		return pngData
-	}
-
-	b := src.Bounds()
-	out := image.NewNRGBA(b)
-	draw.Draw(out, b, src, b.Min, draw.Src)
-
-	w := float64(b.Dx())
-	half := w * slashHalfFrac
-	halo := half + w*slashHaloFrac
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			if out.NRGBAAt(x, y).A == 0 {
-				continue // keep the slash inside the shield silhouette
-			}
-			// Distance from the pixel to the line (x-min)+(y-min) = w.
-			dist := math.Abs(float64(x-b.Min.X)+float64(y-b.Min.Y)-w) / math.Sqrt2
-			switch {
-			case dist <= half:
-				out.SetNRGBA(x, y, slashColor)
-			case dist <= halo:
-				out.SetNRGBA(x, y, slashHalo)
-			}
-		}
-	}
-
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, out); err != nil {
-		slog.Error("failed to encode slashed icon", "error", err)
-		return pngData
-	}
-	return buf.Bytes()
-}
-
-// isBlueDominant reports whether a pixel belongs to the blue shield body rather
-// than the white window bars. Blue pixels have a blue channel clearly above the
-// red and green channels; white/gray bars have roughly equal channels and fail
-// this test, so they are left untouched by the recolor. The margins (12 against
-// red, 8 against green) are calibrated empirically against the shield artwork so
-// the near-equal-channel window bars stay below the threshold.
-func isBlueDominant(r, g, b uint8) bool {
-	return int(b) > int(r)+12 && int(b) > int(g)+8
-}
-
-// rgbToHSV converts an RGB color to HSV. Hue is in degrees [0,360), while
-// saturation and value are in [0,1].
-func rgbToHSV(r, g, b uint8) (h, s, v float64) {
-	rf := float64(r) / 255
-	gf := float64(g) / 255
-	bf := float64(b) / 255
-
-	maxc := math.Max(rf, math.Max(gf, bf))
-	minc := math.Min(rf, math.Min(gf, bf))
-	v = maxc
-
-	delta := maxc - minc
-	if delta == 0 {
-		return 0, 0, v // achromatic
-	}
-	s = delta / maxc
-
-	switch maxc {
-	case rf:
-		h = (gf - bf) / delta
-	case gf:
-		h = 2 + (bf-rf)/delta
+// shieldHalfWidth returns the shield silhouette's half-width at normalized height
+// y (y=0 is the top edge, y=1 the bottom point), as a fraction of the canvas: 0
+// at the point and up to 0.5 at the widest. It returns -1 for y outside [0,1].
+// The profile is rounded top corners, straight vertical sides down to the
+// shoulder, then a parabolic taper converging to a point.
+func shieldHalfWidth(y float64) float64 {
+	const (
+		maxHalf   = 0.5  // widest half-width, spanning the full drawing area
+		corner    = 0.14 // top-corner radius
+		shoulderY = 0.50 // height at which the straight sides begin tapering
+	)
+	switch {
+	case y < 0 || y > 1:
+		return -1
+	case y <= corner:
+		// Quarter-circle top corners pulled in from the full width. The sqrt
+		// argument is clamped to 0 as a guard against floating-point imprecision:
+		// the compiler constant-folds corner*corner at extended precision while
+		// dy*dy is a runtime float64 multiply, so the two can differ by a ULP near
+		// the corner boundary and drive the argument slightly negative (observed
+		// as NaN at y=0, where dy==corner).
+		dy := corner - y
+		return (maxHalf - corner) + math.Sqrt(math.Max(0, corner*corner-dy*dy))
+	case y <= shoulderY:
+		return maxHalf
 	default:
-		h = 4 + (rf-gf)/delta
+		// Parabolic taper: flat at the shoulder, steepening to a point at y=1.
+		t := (y - shoulderY) / (1 - shoulderY)
+		return maxHalf * (1 - t*t)
 	}
-	h *= 60
-	if h < 0 {
-		h += 360
-	}
-	return h, s, v
 }
 
-// hsvToRGB converts an HSV color (hue in degrees, saturation and value in
-// [0,1]) back to an 8-bit RGB triple.
-func hsvToRGB(h, s, v float64) (r, g, b uint8) {
-	if s == 0 {
-		c := uint8(math.Round(v * 255))
-		return c, c, c // achromatic
-	}
-
-	h /= 60
-	i := math.Floor(h)
-	f := h - i
-	p := v * (1 - s)
-	q := v * (1 - s*f)
-	t := v * (1 - s*(1-f))
-
-	var rf, gf, bf float64
-	switch int(i) % 6 {
-	case 0:
-		rf, gf, bf = v, t, p
-	case 1:
-		rf, gf, bf = q, v, p
-	case 2:
-		rf, gf, bf = p, v, t
-	case 3:
-		rf, gf, bf = p, q, v
-	case 4:
-		rf, gf, bf = t, p, v
-	default:
-		rf, gf, bf = v, p, q
-	}
-
-	return uint8(math.Round(rf * 255)), uint8(math.Round(gf * 255)), uint8(math.Round(bf * 255))
+// inShield reports whether the normalized point (x,y) lies inside the shield
+// silhouette, where x and y are in [0,1] across the drawing area.
+func inShield(x, y float64) bool {
+	hw := shieldHalfWidth(y)
+	return hw >= 0 && math.Abs(x-0.5) <= hw
 }
