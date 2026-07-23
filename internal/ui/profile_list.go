@@ -173,11 +173,14 @@ func (pl *ProfileList) addProfileRow(p *profile.Profile) {
 	deleteButton.AddCSSClass("flat")
 	deleteButton.SetTooltipText("Delete Profile")
 
-	// Capture profile for closure
+	// Capture the profile for the closure. UpdateProfile refreshes the entry in
+	// profileMap on edit but cannot reach this captured variable, so resolve the
+	// current profile by ID at click time (see profileForDeletion) instead of
+	// handing the callback a pre-edit pointer.
 	captured := p
 	deleteButton.ConnectClicked(func() {
 		if pl.onDeleted != nil {
-			pl.onDeleted(captured)
+			pl.onDeleted(pl.profileForDeletion(captured))
 		}
 	})
 	hbox.Append(deleteButton)
@@ -252,7 +255,39 @@ func (pl *ProfileList) UpdateProfile(p *profile.Profile) {
 		pr.subtitleLabel.SetText(subtitle)
 
 		pr.profile = p
+
+		// Keep pl.profiles in sync with the map. Row selection indexes into
+		// pl.profiles (ConnectRowSelected, GetSelectedProfile); without this the
+		// slice would keep the pre-edit pointer, so re-selecting an edited
+		// profile would serve stale data and a later connect would silently
+		// persist the pre-edit values, reverting the saved change.
+		pl.syncProfileInSlice(p)
 	}
+}
+
+// syncProfileInSlice replaces the entry in pl.profiles whose ID matches p with
+// p itself, so the slice stays consistent with profileMap. It is a no-op when
+// no entry matches.
+func (pl *ProfileList) syncProfileInSlice(p *profile.Profile) {
+	for i, existing := range pl.profiles {
+		if existing.ID == p.ID {
+			pl.profiles[i] = p
+			return
+		}
+	}
+}
+
+// profileForDeletion resolves the freshest profile to hand to the delete
+// callback. The delete button closure captures the profile pointer at row
+// creation; after an edit, profileMap holds the refreshed pointer while the
+// captured one is stale (e.g. an outdated name in the confirmation dialog).
+// Resolve via the map by ID, falling back to the captured pointer when the row
+// is no longer tracked so deletion always has a target.
+func (pl *ProfileList) profileForDeletion(captured *profile.Profile) *profile.Profile {
+	if pr, ok := pl.profileMap[captured.ID]; ok && pr.profile != nil {
+		return pr.profile
+	}
+	return captured
 }
 
 // GetProfileByID returns the profile with the given ID, or nil if not found.
