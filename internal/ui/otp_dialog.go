@@ -69,32 +69,27 @@ func (od *OTPDialog) setupDialog() {
 	od.dialog.SetDefaultResponse("submit")
 	od.dialog.SetCloseResponse("cancel")
 
-	// Handle responses
+	// Submit is gated on valid input (toggled in ConnectChanged). AdwAlertDialog
+	// closes automatically whenever a response is activated, so an invalid value
+	// cannot be rejected from inside the response handler without silently
+	// dismissing the dialog — instead we prevent it from activating Submit at
+	// all. A disabled response is also skipped as the default response, so
+	// pressing Enter with invalid input does nothing rather than aborting.
+	od.dialog.SetResponseEnabled("submit", false)
+
+	// Handle responses. Submit is only reachable with valid input (see gating
+	// above), so the handler never vetoes: it always produces a result, which
+	// guarantees the caller's callback runs and the dialog never dead-ends.
 	od.dialog.ConnectResponse(func(response string) {
-		// Guard against double invocation
+		// Guard against double invocation (e.g. the close-response emitted after
+		// the Enter path in ConnectApply already delivered a result).
 		if od.resultSent {
 			return
 		}
 
-		result := OTPDialogResult{
-			Cancelled: response != "submit",
-		}
-
-		if !result.Cancelled {
-			otp := od.otpEntry.Text()
-			// Validate OTP format (4-16 alphanumeric characters)
-			if !isValidOTP(otp) {
-				// Show error styling and keep dialog open
-				od.otpEntry.AddCSSClass("error")
-				od.dialog.SetBody("Invalid OTP. Please enter 4-16 letters or digits.")
-				return
-			}
-			result.OTP = otp
-		}
-
 		od.resultSent = true
 		if od.onResult != nil {
-			od.onResult(result)
+			od.onResult(otpResultFor(response, od.otpEntry.Text()))
 		}
 	})
 
@@ -115,30 +110,42 @@ func (od *OTPDialog) setupDialog() {
 		}
 
 		od.resultSent = true
-		// Trigger the result callback directly with success
-		result := OTPDialogResult{
-			Cancelled: false,
-			OTP:       otp,
-		}
+		// Deliver the result directly, then close. Close() emits the
+		// close-response, but the resultSent guard makes the resulting
+		// ConnectResponse call a no-op.
 		if od.onResult != nil {
-			od.onResult(result)
+			od.onResult(otpResultFor("submit", otp))
 		}
 		od.dialog.Close()
 	})
 
-	// Clear error styling when user starts typing
+	// Clear error styling when user starts typing and gate Submit on validity.
 	od.otpEntry.ConnectChanged(func() {
 		od.otpEntry.RemoveCSSClass("error")
 		od.dialog.SetBody("Enter the one-time password from your authenticator app.")
+		od.dialog.SetResponseEnabled("submit", isValidOTP(od.otpEntry.Text()))
 	})
+}
+
+// otpResultFor maps an AdwAlertDialog response id and the entered token to a
+// dialog result. Only the "submit" response carries the OTP; every other
+// response — cancel, the close-response emitted when the dialog is dismissed,
+// or any unexpected id — is treated as a cancellation.
+func otpResultFor(response, otp string) OTPDialogResult {
+	if response != "submit" {
+		return OTPDialogResult{Cancelled: true}
+	}
+	return OTPDialogResult{OTP: otp}
 }
 
 // Present shows the OTP dialog.
 func (od *OTPDialog) Present(parent gtk.Widgetter) {
-	// Reset state for reuse
+	// Reset state for reuse. The entry is empty, which is not a valid OTP, so
+	// Submit starts disabled and is enabled once valid input is typed.
 	od.otpEntry.SetText("")
 	od.otpEntry.RemoveCSSClass("error")
 	od.dialog.SetBody("Enter the one-time password from your authenticator app.")
+	od.dialog.SetResponseEnabled("submit", false)
 	od.resultSent = false
 	od.dialog.Present(parent)
 }

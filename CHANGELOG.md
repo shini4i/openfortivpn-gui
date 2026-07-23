@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overwrite the saved change with the old values. The delete confirmation
   dialog likewise showed the pre-edit name for a just-edited profile and now
   reflects the saved values.
+- Entering an invalid one-time password no longer silently dismisses the 2FA
+  dialog and abandons the connection. The Submit button stays disabled until a
+  valid token is entered, so the dialog can no longer close without either
+  submitting a valid OTP or being cancelled.
 
 ## [0.3.5] - 2026-06-28
 
