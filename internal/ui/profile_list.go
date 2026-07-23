@@ -252,6 +252,25 @@ func (pl *ProfileList) UpdateProfile(p *profile.Profile) {
 		pr.subtitleLabel.SetText(subtitle)
 
 		pr.profile = p
+
+		// Keep pl.profiles in sync with the map. Row selection indexes into
+		// pl.profiles (ConnectRowSelected, GetSelectedProfile); without this the
+		// slice would keep the pre-edit pointer, so re-selecting an edited
+		// profile would serve stale data and a later connect would silently
+		// persist the pre-edit values, reverting the saved change.
+		pl.syncProfileInSlice(p)
+	}
+}
+
+// syncProfileInSlice replaces the entry in pl.profiles whose ID matches p with
+// p itself, so the slice stays consistent with profileMap. It is a no-op when
+// no entry matches.
+func (pl *ProfileList) syncProfileInSlice(p *profile.Profile) {
+	for i, existing := range pl.profiles {
+		if existing.ID == p.ID {
+			pl.profiles[i] = p
+			return
+		}
 	}
 }
 

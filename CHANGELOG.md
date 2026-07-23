@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Editing an existing profile no longer silently reverts on the next
+  connection. The profile list kept a stale entry after a save, so re-selecting
+  the edited profile served pre-edit data and a subsequent connect could
+  overwrite the saved change with the old values.
+
 ## [0.3.5] - 2026-06-28
 
 ### Changed
