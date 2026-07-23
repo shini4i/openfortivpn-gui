@@ -173,11 +173,14 @@ func (pl *ProfileList) addProfileRow(p *profile.Profile) {
 	deleteButton.AddCSSClass("flat")
 	deleteButton.SetTooltipText("Delete Profile")
 
-	// Capture profile for closure
+	// Capture the profile for the closure. UpdateProfile refreshes the entry in
+	// profileMap on edit but cannot reach this captured variable, so resolve the
+	// current profile by ID at click time (see profileForDeletion) instead of
+	// handing the callback a pre-edit pointer.
 	captured := p
 	deleteButton.ConnectClicked(func() {
 		if pl.onDeleted != nil {
-			pl.onDeleted(captured)
+			pl.onDeleted(pl.profileForDeletion(captured))
 		}
 	})
 	hbox.Append(deleteButton)
@@ -272,6 +275,19 @@ func (pl *ProfileList) syncProfileInSlice(p *profile.Profile) {
 			return
 		}
 	}
+}
+
+// profileForDeletion resolves the freshest profile to hand to the delete
+// callback. The delete button closure captures the profile pointer at row
+// creation; after an edit, profileMap holds the refreshed pointer while the
+// captured one is stale (e.g. an outdated name in the confirmation dialog).
+// Resolve via the map by ID, falling back to the captured pointer when the row
+// is no longer tracked so deletion always has a target.
+func (pl *ProfileList) profileForDeletion(captured *profile.Profile) *profile.Profile {
+	if pr, ok := pl.profileMap[captured.ID]; ok && pr.profile != nil {
+		return pr.profile
+	}
+	return captured
 }
 
 // GetProfileByID returns the profile with the given ID, or nil if not found.

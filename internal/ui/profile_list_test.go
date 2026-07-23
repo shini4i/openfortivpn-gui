@@ -51,3 +51,51 @@ func TestSyncProfileInSlice_EmptySlice(t *testing.T) {
 	})
 	assert.Empty(t, pl.profiles)
 }
+
+// TestProfileForDeletion_ReturnsRefreshedProfile verifies that the delete
+// resolver returns the profile currently held in profileMap rather than the
+// pointer captured when the row was created.
+//
+// Regression test: the delete button closure in addProfileRow captures the
+// profile pointer at row-creation time. UpdateProfile refreshes
+// profileMap[id].profile on edit but cannot reach that captured variable, so
+// deleting an edited profile would show pre-edit values (e.g. the old name in
+// the confirmation dialog). Resolving by ID at click time fixes this.
+func TestProfileForDeletion_ReturnsRefreshedProfile(t *testing.T) {
+	id := "11111111-1111-1111-1111-111111111111"
+	captured := &profile.Profile{ID: id, Name: "old-name"}
+	refreshed := &profile.Profile{ID: id, Name: "new-name"}
+	pl := &ProfileList{
+		profileMap: map[string]*profileRow{
+			id: {profile: refreshed},
+		},
+	}
+
+	got := pl.profileForDeletion(captured)
+
+	assert.Same(t, refreshed, got, "must resolve the current map entry, not the captured pointer")
+}
+
+// TestProfileForDeletion_FallsBackToCaptured verifies that when the profile is
+// no longer tracked in the map (or its entry has a nil profile), the resolver
+// returns the captured pointer so deletion still has a target.
+func TestProfileForDeletion_FallsBackToCaptured(t *testing.T) {
+	captured := &profile.Profile{ID: "11111111-1111-1111-1111-111111111111", Name: "only-copy"}
+
+	tests := []struct {
+		name string
+		pl   *ProfileList
+	}{
+		{"id absent from map", &ProfileList{profileMap: map[string]*profileRow{}}},
+		{"nil map", &ProfileList{}},
+		{"entry has nil profile", &ProfileList{profileMap: map[string]*profileRow{
+			captured.ID: {profile: nil},
+		}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Same(t, captured, tt.pl.profileForDeletion(captured))
+		})
+	}
+}
