@@ -1,6 +1,6 @@
 module github.com/shini4i/openfortivpn-gui
 
-go 1.26.4
+go 1.26.5
 
 require (
 	fyne.io/systray v1.12.2
