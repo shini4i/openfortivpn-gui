@@ -12,8 +12,6 @@ import (
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 
-	"github.com/godbus/dbus/v5"
-
 	"github.com/shini4i/openfortivpn-gui/internal/client"
 	"github.com/shini4i/openfortivpn-gui/internal/config"
 	"github.com/shini4i/openfortivpn-gui/internal/keyring"
@@ -350,42 +348,6 @@ func (a *App) ShowPreferencesDialog() {
 	})
 
 	prefs.Present()
-}
-
-// hasTraySupport returns true if a StatusNotifierWatcher exists and has an active StatusNotifierHost registered.
-func hasTraySupport() bool {
-	conn, err := dbus.ConnectSessionBus()
-	if err != nil {
-		return false
-	}
-
-	defer conn.Close()
-
-	watchers := []string{
-		"org.kde.StatusNotifierWatcher",
-		"org.freedesktop.StatusNotifierWatcher",
-		"org.ayatana.StatusNotifierWatcher",
-	}
-
-	for _, watcher := range watchers {
-		var hasOwner bool
-		// Verify ownership via root DBus daemon to prevent ServiceUnknown errors
-		err := conn.BusObject().Call("org.freedesktop.DBus.NameHasOwner", 0, watcher).Store(&hasOwner)
-		if err != nil || !hasOwner {
-			continue
-		}
-
-		// Verify that a host panel/extension is registered to render icons
-		obj := conn.Object(watcher, dbus.ObjectPath("/StatusNotifierWatcher"))
-		variant, err := obj.GetProperty(watcher + ".IsStatusNotifierHostRegistered")
-		if err == nil {
-			if registered, ok := variant.Value().(bool); ok && registered {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 // updateConfigField atomically updates a single config field and persists the change.

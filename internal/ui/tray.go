@@ -9,9 +9,22 @@ import (
 
 	"fyne.io/systray"
 
+	"context"
+	"time"
+
+	"github.com/godbus/dbus/v5"
 	"github.com/shini4i/openfortivpn-gui/internal/stats"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
+
+const DefaultDBusTimeout = time.Second
+
+// List of known system indicator implementations on Linux
+var SysTrayImpls map[string]bool = map[string]bool{
+	"org.freedesktop.StatusNotifierWatcher": true,
+	"org.kde.StatusNotifierWatcher":         true,
+	"org.ayatana.StatusNotifierWatcher":     true,
+}
 
 var (
 	// ErrTrayAlreadyRunning is returned when attempting to modify callbacks after Run() has been called.
@@ -348,4 +361,62 @@ func (t *TrayIcon) updateMenu() {
 	} else {
 		t.menuDisconnect.Disable()
 	}
+}
+
+// hasTraySupport probes the session DBus to evaluate whether a valid StatusNotifierHost
+// is registered to render system tray icons. Execution is bounded by DefaultDBusTimeout.
+func hasTraySupport() bool {
+	return hasTraySupportWithTimeout(DefaultDBusTimeout)
+}
+
+// hasTraySupportWithTimeout evaluates tray support within a specified time budget.
+func hasTraySupportWithTimeout(timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	conn, err := dbus.ConnectSessionBus()
+	if err != nil {
+		return false
+	}
+
+	defer conn.Close()
+
+	// Query all owned bus names in a single roundtrip instead of sequential NameHasOwner checks
+	var names []string
+	err = conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.ListNames", 0).Store(&names)
+
+	if err != nil {
+		return false
+	}
+
+	var targetWatcher string
+
+	for _, name := range names {
+		if SysTrayImpls[name] {
+			targetWatcher = name
+			break
+		}
+	}
+
+	if targetWatcher == "" {
+		return false
+	}
+
+	// Query the rendering host status using org.freedesktop.DBus.Properties.Get with context
+	obj := conn.Object(targetWatcher, dbus.ObjectPath("/StatusNotifierWatcher"))
+	var variant dbus.Variant
+
+	err = obj.CallWithContext(
+		ctx,
+		"org.freedesktop.DBus.Properties.Get",
+		0,
+		targetWatcher,
+		"IsStatusNotifierHostRegistered",
+	).Store(&variant)
+	if err != nil {
+		return false
+	}
+
+	registered, ok := variant.Value().(bool)
+	return ok && registered
 }
