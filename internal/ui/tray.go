@@ -374,7 +374,7 @@ func hasTraySupportWithTimeout(timeout time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	conn, err := dbus.ConnectSessionBus()
+	conn, err := dbus.ConnectSessionBus(dbus.WithContext(ctx))
 	if err != nil {
 		return false
 	}
