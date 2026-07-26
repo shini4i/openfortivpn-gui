@@ -155,7 +155,7 @@ func (a *App) Run(args []string) int {
 }
 
 // onActivate is called when the application is activated.
-// If profiles exist, the app starts in tray-only mode (window hidden).
+// If profiles exist and a system tray is supported, the app starts in tray-only mode (window hidden).
 // The window is always created to ensure VPN callbacks are registered.
 func (a *App) onActivate() {
 	// Register application actions
@@ -183,13 +183,16 @@ func (a *App) onActivate() {
 	// Keep app running even when window is hidden (tray mode)
 	a.app.Hold()
 
-	// Check if profiles exist to determine startup mode
-	if a.hasProfiles() {
-		a.tryAutoConnect()
+	hasProfiles := a.hasProfiles()
+
+	// Present window if tray is unavailable or if no profiles exist for first-time setup
+	if !s || a.tray == nil || !hasProfiles {
+		a.window.Present()
 	}
 
-	if !s || a.tray == nil {
-		a.window.Present()
+	// Attempt auto-connect whenever profiles are present
+	if hasProfiles {
+		a.tryAutoConnect()
 	}
 }
 
