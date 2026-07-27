@@ -19,12 +19,12 @@ import (
 
 const defaultDBusTimeout = time.Second
 
-// List of known system indicator implementations on Linux
-var SysTrayImpls map[string]bool = map[string]bool{
-	"org.freedesktop.StatusNotifierWatcher": true,
-	"org.kde.StatusNotifierWatcher":         true,
-	"org.ayatana.StatusNotifierWatcher":     true,
-}
+const (
+	sniBusName   = "org.kde.StatusNotifierWatcher"
+	sniPath      = "/StatusNotifierWatcher"
+	sniInterface = "org.kde.StatusNotifierWatcher"
+	sniProperty  = "IsStatusNotifierHostRegistered"
+)
 
 var (
 	// ErrTrayAlreadyRunning is returned when attempting to modify callbacks after Run() has been called.
@@ -380,38 +380,15 @@ func hasTraySupportWithTimeout(timeout time.Duration) bool {
 	}
 	defer func() { _ = conn.Close() }()
 
+	obj := conn.Object(sniBusName, dbus.ObjectPath(sniPath))
 
-	// Query all owned bus names in a single roundtrip instead of sequential NameHasOwner checks
-	var names []string
-	err = conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.ListNames", 0).Store(&names)
-
-	if err != nil {
-		return false
-	}
-
-	var targetWatcher string
-
-	for _, name := range names {
-		if SysTrayImpls[name] {
-			targetWatcher = name
-			break
-		}
-	}
-
-	if targetWatcher == "" {
-		return false
-	}
-
-	// Query the rendering host status using org.freedesktop.DBus.Properties.Get with context
-	obj := conn.Object(targetWatcher, dbus.ObjectPath("/StatusNotifierWatcher"))
 	var variant dbus.Variant
-
 	err = obj.CallWithContext(
 		ctx,
 		"org.freedesktop.DBus.Properties.Get",
 		0,
-		targetWatcher,
-		"IsStatusNotifierHostRegistered",
+		sniInterface,
+		sniProperty,
 	).Store(&variant)
 	if err != nil {
 		return false
