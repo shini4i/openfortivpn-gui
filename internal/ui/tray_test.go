@@ -3,6 +3,7 @@ package ui
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -264,6 +265,20 @@ func TestTrayIcon_StateAccessConcurrency(t *testing.T) {
 	_ = tray.state
 	_ = tray.profileName
 	tray.mu.RUnlock()
+}
+
+func TestHasTraySupportWithTimeout_CompletesInTime(t *testing.T) {
+	timeout := 50 * time.Millisecond
+	start := time.Now()
+
+	// Call with short timeout - should not hang forever
+	_ = hasTraySupportWithTimeout(timeout)
+
+	elapsed := time.Since(start)
+	// Allow 3x margin for slow CI
+	maxAllowed := timeout * 3
+	assert.Less(t, elapsed, maxAllowed,
+		"hasTraySupportWithTimeout should complete within reasonable time")
 }
 
 func TestTrayIcon_CallbacksNilByDefault(t *testing.T) {
