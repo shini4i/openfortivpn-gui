@@ -31,6 +31,14 @@
       "llm_version": "gemini-3-flash-preview",
       "last_updated": "2026-07-27T17:08:36.612Z",
       "mode": "freeform"
+    },
+    {
+      "ticket_id": "ATHENA-1575",
+      "description": "-",
+      "asterix_version": "2.5.0",
+      "llm_version": "saas-fireworks-zai-glm-4.7",
+      "last_updated": "2026-07-27T17:10:04.562Z",
+      "mode": "freeform"
     }
   ]
 }

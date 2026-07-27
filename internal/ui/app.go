@@ -156,42 +156,28 @@ func (a *App) Run(args []string) int {
 // If profiles exist and a system tray is supported, the app starts in tray-only mode (window hidden).
 // The window is always created to ensure VPN callbacks are registered.
 func (a *App) onActivate() {
-	// Register application actions
+	// register application actions
 	a.registerActions()
 
-	// Initialize notifier and sync enabled state from saved config
-	if a.notifier == nil {
-		a.notifier = NewNotifier(a.app)
-		cfg := a.configManager.GetConfig()
-		a.notifier.SetEnabled(cfg.ShowNotifications)
-	}
-
-	// Check if environment supports system trays
-	s := hasTraySupport()
-
-	// Initialize system tray (before window so we can pass it)
-	if s && a.tray == nil {
-		a.initTray()
-	}
-
-	// Always create window to ensure VPN callbacks are registered
-	// (callbacks handle tray updates, notifications, state display)
+	// ensure UI components exist before VPN connection is established
+	a.ensureNotifier()
 	a.ensureWindow()
+	hasTray := a.ensureTray()
 
-	// Keep app running even when window is hidden (tray mode)
 	a.app.Hold()
 
 	hasProfiles := a.hasProfiles()
-
-	// Present window if tray is unavailable or if no profiles exist for first-time setup
-	if !s || a.tray == nil || !hasProfiles {
-		a.window.Present()
-	}
-
-	// Attempt auto-connect whenever profiles are present
 	if hasProfiles {
 		a.tryAutoConnect()
 	}
+
+	// Tray mode requires an initialized tray and existing profiles
+	if !hasTray || !hasProfiles {
+		a.window.Present()
+		return
+	}
+
+	slog.Debug("Starting in tray-only mode")
 }
 
 // tryAutoConnect attempts to automatically connect to the default profile on startup.
@@ -475,6 +461,29 @@ func (a *App) hasProfiles() bool {
 		return false // Show window on error so user can see what's wrong
 	}
 	return len(result.Profiles) > 0
+}
+
+// ensureNotifier initializes the notifier if not present
+func (a *App) ensureNotifier() {
+	if a.notifier == nil {
+		a.notifier = NewNotifier(a.app)
+		cfg := a.configManager.GetConfig()
+		a.notifier.SetEnabled(cfg.ShowNotifications)
+	}
+}
+
+// ensureTray initializes a tray if supported and not yet created.
+// Returns true only if a tray exists AND current environment supports it.
+func (a *App) ensureTray() bool {
+	if !hasTraySupport() {
+		return false
+	}
+
+	if a.tray == nil {
+		a.initTray()
+	}
+
+	return a.tray != nil
 }
 
 // ensureWindow creates the main window if it doesn't exist.
