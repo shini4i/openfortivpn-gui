@@ -161,9 +161,9 @@ func (a *App) onActivate() {
 
 	// ensure UI components exist before VPN connection is established
 	a.ensureNotifier()
-	a.ensureWindow()
 	hasTray := a.ensureTray()
 
+	a.ensureWindow()
 	a.app.Hold()
 
 	hasProfiles := a.hasProfiles()
