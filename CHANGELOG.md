@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dialog and abandons the connection. The Submit button stays disabled until a
   valid token is entered, so the dialog can no longer close without either
   submitting a valid OTP or being cancelled.
+- Environments where a system tray implementation is not available, the window
+  now appears unconditionally. This is in contrast to environments with an
+  available system tray implementation where the window is not shown if a
+  profile is already set up
 
 ## [0.3.5] - 2026-06-28
 

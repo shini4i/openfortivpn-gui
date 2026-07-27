@@ -9,8 +9,21 @@ import (
 
 	"fyne.io/systray"
 
+	"context"
+	"time"
+
+	"github.com/godbus/dbus/v5"
 	"github.com/shini4i/openfortivpn-gui/internal/stats"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
+)
+
+const defaultDBusTimeout = time.Second
+
+const (
+	sniBusName   = "org.kde.StatusNotifierWatcher"
+	sniPath      = "/StatusNotifierWatcher"
+	sniInterface = "org.kde.StatusNotifierWatcher"
+	sniProperty  = "IsStatusNotifierHostRegistered"
 )
 
 var (
@@ -348,4 +361,39 @@ func (t *TrayIcon) updateMenu() {
 	} else {
 		t.menuDisconnect.Disable()
 	}
+}
+
+// hasTraySupport probes DBus to determine if a StatusNotifierHost is registered
+// on org.kde.StatusNotifierWatcher. Bounded by defaultDBusTimeout.
+func hasTraySupport() bool {
+	return hasTraySupportWithTimeout(defaultDBusTimeout)
+}
+
+// hasTraySupportWithTimeout evaluates tray support within a specified time budget.
+func hasTraySupportWithTimeout(timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	conn, err := dbus.ConnectSessionBus(dbus.WithContext(ctx))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = conn.Close() }()
+
+	obj := conn.Object(sniBusName, dbus.ObjectPath(sniPath))
+
+	var variant dbus.Variant
+	err = obj.CallWithContext(
+		ctx,
+		"org.freedesktop.DBus.Properties.Get",
+		0,
+		sniInterface,
+		sniProperty,
+	).Store(&variant)
+	if err != nil {
+		return false
+	}
+
+	registered, ok := variant.Value().(bool)
+	return ok && registered
 }
