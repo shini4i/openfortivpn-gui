@@ -47,6 +47,14 @@
       "llm_version": "claude-sonnet-4.5",
       "last_updated": "2026-07-27T17:10:26.068Z",
       "mode": "freeform"
+    },
+    {
+      "ticket_id": "ATHENA-1575",
+      "description": "-",
+      "asterix_version": "2.5.0",
+      "llm_version": "saas-fireworks-zai-glm-4.7saas-fireworks-zai-glm-4.7",
+      "last_updated": "2026-07-27T17:12:42.394Z",
+      "mode": "freeform"
     }
   ]
 }
