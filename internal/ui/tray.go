@@ -17,7 +17,7 @@ import (
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
 
-const DefaultDBusTimeout = time.Second
+const defaultDBusTimeout = time.Second
 
 // List of known system indicator implementations on Linux
 var SysTrayImpls map[string]bool = map[string]bool{
@@ -363,10 +363,10 @@ func (t *TrayIcon) updateMenu() {
 	}
 }
 
-// hasTraySupport probes the session DBus to evaluate whether a valid StatusNotifierHost
-// is registered to render system tray icons. Execution is bounded by DefaultDBusTimeout.
+// hasTraySupport probes DBus to determine if a StatusNotifierHost is registered
+// on org.kde.StatusNotifierWatcher. Bounded by defaultDBusTimeout.
 func hasTraySupport() bool {
-	return hasTraySupportWithTimeout(DefaultDBusTimeout)
+	return hasTraySupportWithTimeout(defaultDBusTimeout)
 }
 
 // hasTraySupportWithTimeout evaluates tray support within a specified time budget.
