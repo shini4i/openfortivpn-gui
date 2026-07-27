@@ -378,8 +378,8 @@ func hasTraySupportWithTimeout(timeout time.Duration) bool {
 	if err != nil {
 		return false
 	}
+	defer func() { _ = conn.Close() }()
 
-	defer conn.Close()
 
 	// Query all owned bus names in a single roundtrip instead of sequential NameHasOwner checks
 	var names []string

@@ -15,6 +15,14 @@
       "llm_version": "accounts/fireworks/models/glm-4p7",
       "last_updated": "2026-07-27T17:04:55.896Z",
       "mode": "freeform"
+    },
+    {
+      "ticket_id": "ATHENA-1575",
+      "description": "-",
+      "asterix_version": "2.5.0",
+      "llm_version": "claude-sonnet-4-6",
+      "last_updated": "2026-07-27T17:06:00.846Z",
+      "mode": "freeform"
     }
   ]
 }
