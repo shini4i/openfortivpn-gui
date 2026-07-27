@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-07-27
+
 ### Fixed
 
 - Editing an existing profile no longer silently reverts on the next
@@ -19,10 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dialog and abandons the connection. The Submit button stays disabled until a
   valid token is entered, so the dialog can no longer close without either
   submitting a valid OTP or being cancelled.
-- Environments where a system tray implementation is not available, the window
-  now appears unconditionally. This is in contrast to environments with an
-  available system tray implementation where the window is not shown if a
-  profile is already set up
+- In environments without system tray support (for example, GNOME with no
+  AppIndicator extension), the main window now opens on startup instead of
+  staying hidden behind a tray icon that never renders. Previously the app
+  could start with no visible window and no working tray icon, leaving the UI
+  unreachable. Where a tray is available, startup is unchanged — the window
+  stays hidden when a profile already exists.
 
 ## [0.3.5] - 2026-06-28
 
@@ -61,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`NoNewPrivileges`, namespace/syscall/address-family restrictions,
   `MemoryDenyWriteExecute`, and related protections).
 
-[Unreleased]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.3...v0.3.4
