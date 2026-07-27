@@ -18,7 +18,7 @@
 
 - **Multiple VPN Profiles** - Create, edit, and manage multiple VPN connection profiles
 - **Multiple Authentication Methods**: Username/Password, OTP, Client Certificate, SAML/SSO
-- **System Tray Integration** - Minimize to tray, quick connect/disconnect
+- **System Tray Integration** - Minimize to tray, quick connect/disconnect ([setup notes](#system-tray))
 - **Desktop Notifications** - Connection status notifications
 - **Secure Credential Storage** - Passwords stored in system keyring (libsecret)
 - **Auto-Connect** - Optionally connect to last used profile on startup
@@ -124,6 +124,18 @@ task run
 4. Select a profile and click "Connect"
 
 Set `OPENFORTIVPN_GUI_DEBUG=1` for debug logging (the helper daemon also accepts a `-debug` flag).
+
+### System Tray
+
+Tray integration uses the [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/) (SNI) D-Bus protocol — the cross-desktop standard supported by KDE Plasma, XFCE, Waybar, and most panels. On startup the app probes D-Bus for a registered SNI host: if one is found and at least one profile exists, it starts minimized to tray; otherwise the main window is presented so the UI is never unreachable.
+
+Two environments need extra setup for tray mode:
+
+- **GNOME** ships no SNI host by default. Install the [AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/) extension.
+- **Legacy X11 panels** that only speak the older XEmbed tray spec need a bridge such as [snixembed](https://git.sr.ht/~steef/snixembed).
+
+> [!NOTE]
+> There is no in-app workaround for a missing SNI host. XEmbed is X11-only and unavailable under Wayland, and GTK4 removed `GtkStatusIcon` entirely — without a host process listening on the bus, there is no tray to render into.
 
 ## License
 
