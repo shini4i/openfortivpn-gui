@@ -250,3 +250,70 @@ func TestMainWindow_ReleaseConnectingProfile(t *testing.T) {
 		})
 	}
 }
+
+// TestMainWindow_HandleError_DropsSupersededConnection covers a callback that
+// was raised for one connection but reaches the main thread after the user has
+// started another: acting on it would discard the new connection's password for
+// a rejection that belongs to the old one.
+func TestMainWindow_HandleError_DropsSupersededConnection(t *testing.T) {
+	const profileID = "3f8a1c6e-1d2b-4c9a-8e7f-0a1b2c3d4e5f"
+	const credentialFailure = "Could not authenticate to gateway. Please check the password, client certificate, etc."
+
+	newWindow := func(kr keyring.Store, shown *[]string) *MainWindow {
+		w := &MainWindow{
+			deps:              &MainWindowDeps{KeyringStore: kr},
+			connectingProfile: &profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodPassword},
+			scheduleOnMain:    func(fn func()) { fn() },
+		}
+		w.presentError = func(_, message string) { *shown = append(*shown, message) }
+		w.connection.begin()
+		return w
+	}
+
+	t.Run("a retry started in between drops the error", func(t *testing.T) {
+		kr := &fakeKeyring{password: "right"}
+		var shown []string
+		w := newWindow(kr, &shown)
+
+		// The retry lands between the callback being raised and the main loop
+		// running it, which is the whole window this guard exists for.
+		w.scheduleOnMain = func(fn func()) {
+			w.connection.begin()
+			fn()
+		}
+
+		w.handleError(errors.New(credentialFailure))
+
+		assert.Empty(t, kr.deleted,
+			"a rejection from a superseded connection must not discard the current one's password")
+		assert.Empty(t, shown, "nor report a failure the current connection has not had")
+	})
+
+	t.Run("the current connection's error is acted on", func(t *testing.T) {
+		kr := &fakeKeyring{password: "wrong"}
+		var shown []string
+		w := newWindow(kr, &shown)
+
+		w.handleError(errors.New(credentialFailure))
+
+		assert.Equal(t, []string{profileID}, kr.deleted)
+		assert.Equal(t, []string{credentialFailure}, shown)
+	})
+}
+
+// TestConnectionCounter tracks which connection a callback belongs to; a
+// callback raised under an earlier count must not be treated as current.
+func TestConnectionCounter(t *testing.T) {
+	var counter connectionCounter
+
+	assert.True(t, counter.isCurrent(0), "no connection started yet")
+
+	first := counter.begin()
+	assert.True(t, counter.isCurrent(first))
+	assert.Equal(t, first, counter.current())
+
+	second := counter.begin()
+	assert.NotEqual(t, first, second)
+	assert.True(t, counter.isCurrent(second))
+	assert.False(t, counter.isCurrent(first), "the earlier connection is superseded")
+}
