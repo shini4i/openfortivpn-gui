@@ -343,3 +343,75 @@ func TestMainWindow_CountConnection(t *testing.T) {
 	w.countConnection(vpn.StateConnecting)
 	assert.NotEqual(t, first, w.connection.current(), "a retry starts a new count")
 }
+
+// TestMainWindow_ForgetSavedPassword covers the explicit forget action, which
+// is the only way an OTP profile can replace a stale password: a rejected
+// one-time token reports the same gateway error as a rejected password, so the
+// automatic discard cannot run for those profiles.
+func TestMainWindow_ForgetSavedPassword(t *testing.T) {
+	const profileID = "3f8a1c6e-1d2b-4c9a-8e7f-0a1b2c3d4e5f"
+
+	newWindow := func(kr keyring.Store, shown, toasts *[]string) *MainWindow {
+		w := &MainWindow{deps: &MainWindowDeps{KeyringStore: kr}}
+		w.presentError = func(_, message string) { *shown = append(*shown, message) }
+		w.presentToast = func(message string) { *toasts = append(*toasts, message) }
+		return w
+	}
+
+	t.Run("deletes the stored password and confirms it", func(t *testing.T) {
+		kr := &fakeKeyring{password: "stale"}
+		var shown, toasts []string
+		w := newWindow(kr, &shown, &toasts)
+
+		w.forgetSavedPassword(&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodOTP})
+
+		assert.Equal(t, []string{profileID}, kr.deleted)
+		assert.Empty(t, shown, "a successful delete must not report an error")
+		assert.Len(t, toasts, 1, "success is otherwise invisible in the window")
+	})
+
+	t.Run("a failed delete is reported", func(t *testing.T) {
+		kr := &fakeKeyring{password: "stale", delErr: errors.New("keyring locked")}
+		var shown, toasts []string
+		w := newWindow(kr, &shown, &toasts)
+
+		w.forgetSavedPassword(&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodOTP})
+
+		assert.Equal(t, []string{profileID}, kr.deleted)
+		assert.Equal(t, []string{"keyring locked"}, shown,
+			"the user must learn the password is still stored")
+		assert.Empty(t, toasts, "a failure must not be confirmed as a success")
+	})
+
+	t.Run("nil profile is a no-op", func(t *testing.T) {
+		kr := &fakeKeyring{password: "stale"}
+		var shown, toasts []string
+		w := newWindow(kr, &shown, &toasts)
+
+		assert.NotPanics(t, func() { w.forgetSavedPassword(nil) })
+		assert.Empty(t, kr.deleted)
+		assert.Empty(t, toasts)
+	})
+
+	// Tray-only paths build a window with partial deps.
+	t.Run("missing keyring store is a no-op", func(t *testing.T) {
+		var shown, toasts []string
+		w := newWindow(nil, &shown, &toasts)
+
+		assert.NotPanics(t, func() {
+			w.forgetSavedPassword(&profile.Profile{ID: profileID})
+		})
+		assert.Empty(t, shown, "a missing keyring store must not surface an error dialog")
+		assert.Empty(t, toasts, "nor claim a password was forgotten")
+	})
+}
+
+// TestMainWindow_ForgetPassword_NilGuards covers the guards that keep the
+// forget path safe on a window without widgets: the tray-only and test paths
+// build a MainWindow whose toast overlay was never created.
+func TestMainWindow_ForgetPassword_NilGuards(t *testing.T) {
+	assert.NotPanics(t, func() { (&MainWindow{}).showToast("anything") },
+		"a window with no toast overlay must not reach Adw")
+	assert.NotPanics(t, func() { (&MainWindow{}).onForgetPassword(nil) },
+		"a nil profile must return before the dialog is constructed")
+}
