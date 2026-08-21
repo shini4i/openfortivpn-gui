@@ -218,3 +218,79 @@ func TestAuthMethodSelectionRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// TestAuthRowVisibilityFor pins which authentication rows belong to each Method
+// combo index. The saved-password row must follow the password method (which
+// covers 2FA) and stay hidden for certificate and SAML profiles, where no
+// password is ever stored.
+func TestAuthRowVisibilityFor(t *testing.T) {
+	tests := []struct {
+		name  string
+		index uint
+		want  authRowVisibility
+	}{
+		{
+			name:  "password shows username, 2FA and the saved password",
+			index: methodIndexPassword,
+			want:  authRowVisibility{CertGroup: false, Username: true, OTP: true, SavedPassword: true},
+		},
+		{
+			name:  "certificate shows only the certificate group",
+			index: methodIndexCertificate,
+			want:  authRowVisibility{CertGroup: true, Username: false, OTP: false, SavedPassword: false},
+		},
+		{
+			name:  "saml hides every password-specific row",
+			index: methodIndexSAML,
+			want:  authRowVisibility{CertGroup: false, Username: false, OTP: false, SavedPassword: false},
+		},
+		{
+			// Unreachable: the Method combo holds exactly three items. The
+			// password rows stay hidden so an out-of-range index cannot offer
+			// to forget a password.
+			name:  "unknown index keeps the username row only",
+			index: 99,
+			want:  authRowVisibility{CertGroup: false, Username: true, OTP: false, SavedPassword: false},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, authRowVisibilityFor(tt.index))
+		})
+	}
+}
+
+// TestProfileEditor_OnForgetPasswordClicked pins that the forget action reports
+// the stored profile rather than one rebuilt from the form: the keyring is keyed
+// by profile ID, so handing over anything form-derived risks deleting the wrong
+// entry — or none — while telling the user the password is gone.
+func TestProfileEditor_OnForgetPasswordClicked(t *testing.T) {
+	stored := &profile.Profile{ID: "3f8a1c6e-1d2b-4c9a-8e7f-0a1b2c3d4e5f"}
+
+	t.Run("reports the stored profile", func(t *testing.T) {
+		var got []*profile.Profile
+		pe := &ProfileEditor{currentProfile: stored}
+		pe.OnForgetPassword(func(p *profile.Profile) { got = append(got, p) })
+
+		pe.onForgetPasswordClicked()
+
+		assert.Len(t, got, 1)
+		assert.Same(t, stored, got[0], "the keyring key must come from the stored profile")
+	})
+
+	t.Run("no profile loaded is a no-op", func(t *testing.T) {
+		var called int
+		pe := &ProfileEditor{}
+		pe.OnForgetPassword(func(*profile.Profile) { called++ })
+
+		assert.NotPanics(t, pe.onForgetPasswordClicked)
+		assert.Zero(t, called, "nothing can be forgotten without a profile")
+	})
+
+	t.Run("no callback registered is a no-op", func(t *testing.T) {
+		pe := &ProfileEditor{currentProfile: stored}
+
+		assert.NotPanics(t, pe.onForgetPasswordClicked)
+	})
+}

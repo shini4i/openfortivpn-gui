@@ -20,6 +20,7 @@ type ProfileEditor struct {
 	usernameRow      *adw.EntryRow
 	authMethodRow    *adw.ComboRow
 	otpRow           *adw.SwitchRow
+	savedPasswordRow *adw.ActionRow
 	clientCertRow    *adw.EntryRow
 	clientKeyRow     *adw.EntryRow
 	trustedCertRow   *adw.EntryRow
@@ -34,6 +35,9 @@ type ProfileEditor struct {
 	// Save button
 	saveButton *gtk.Button
 
+	// Forget button in the saved password row
+	forgetPasswordButton *gtk.Button
+
 	// Current profile
 	currentProfile *profile.Profile
 
@@ -42,7 +46,8 @@ type ProfileEditor struct {
 	populating bool // True when populating fields to prevent false dirty state
 
 	// Callbacks
-	onSave func(p *profile.Profile)
+	onSave           func(p *profile.Profile)
+	onForgetPassword func(p *profile.Profile)
 }
 
 // Method combo indices in the profile editor. Mirrors the StringList order
@@ -136,6 +141,18 @@ func (pe *ProfileEditor) setupWidget() {
 	pe.usernameRow.SetTitle("Username")
 	pe.usernameRow.ConnectChanged(pe.markDirty)
 	authGroup.Add(pe.usernameRow)
+
+	// Forgetting the password takes effect immediately and is independent of
+	// the form, so this row does not mark the editor dirty.
+	pe.savedPasswordRow = adw.NewActionRow()
+	pe.savedPasswordRow.SetTitle("Saved Password")
+	pe.savedPasswordRow.SetSubtitle("Remove the password stored in the system keyring")
+	pe.forgetPasswordButton = gtk.NewButtonWithLabel("Forget")
+	pe.forgetPasswordButton.AddCSSClass("destructive-action")
+	pe.forgetPasswordButton.SetVAlign(gtk.AlignCenter)
+	pe.forgetPasswordButton.ConnectClicked(pe.onForgetPasswordClicked)
+	pe.savedPasswordRow.AddSuffix(pe.forgetPasswordButton)
+	authGroup.Add(pe.savedPasswordRow)
 
 	prefsPage.Add(authGroup)
 
@@ -263,19 +280,42 @@ func selectionToAuthMethod(methodIndex uint, otpEnabled bool) profile.AuthMethod
 	}
 }
 
+// authRowVisibility reports which authentication-specific editor rows apply to
+// a Method combo index.
+type authRowVisibility struct {
+	CertGroup     bool
+	Username      bool
+	OTP           bool
+	SavedPassword bool
+}
+
+// authRowVisibilityFor resolves the visibility of the authentication rows for a
+// Method combo index. It exists as a pure function so the rule can be tested
+// without a GTK display.
+func authRowVisibilityFor(methodIndex uint) authRowVisibility {
+	isPasswordAuth := methodIndex == methodIndexPassword
+	isCertAuth := methodIndex == methodIndexCertificate
+	isSAMLAuth := methodIndex == methodIndexSAML
+
+	return authRowVisibility{
+		CertGroup: isCertAuth,
+		// SAML does not need a username upfront.
+		Username: !isCertAuth && !isSAMLAuth,
+		// 2FA is a modifier on password auth only.
+		OTP: isPasswordAuth,
+		// Only password auth (2FA included) stores a password to forget.
+		SavedPassword: isPasswordAuth,
+	}
+}
+
 // updateAuthMethodVisibility shows/hides fields based on auth method.
 func (pe *ProfileEditor) updateAuthMethodVisibility() {
-	selected := pe.authMethodRow.Selected()
-	isPasswordAuth := selected == methodIndexPassword
-	isCertAuth := selected == methodIndexCertificate
-	isSAMLAuth := selected == methodIndexSAML
+	visible := authRowVisibilityFor(pe.authMethodRow.Selected())
 
-	// Certificate fields only for cert auth
-	pe.certGroup.SetVisible(isCertAuth)
-	// Username for password auth only (SAML doesn't need it upfront)
-	pe.usernameRow.SetVisible(!isCertAuth && !isSAMLAuth)
-	// 2FA is a modifier on password auth only
-	pe.otpRow.SetVisible(isPasswordAuth)
+	pe.certGroup.SetVisible(visible.CertGroup)
+	pe.usernameRow.SetVisible(visible.Username)
+	pe.otpRow.SetVisible(visible.OTP)
+	pe.savedPasswordRow.SetVisible(visible.SavedPassword)
 }
 
 // markDirty is called when any field value changes.
@@ -296,6 +336,15 @@ func (pe *ProfileEditor) onSaveClicked() {
 		pe.onSave(pe.GetProfile())
 		pe.isDirty = false
 		pe.saveButton.SetSensitive(false)
+	}
+}
+
+// onForgetPasswordClicked is called when the Forget button is clicked. It
+// reports the stored profile rather than the form values, because the keyring
+// is keyed by the profile ID, which the form cannot change.
+func (pe *ProfileEditor) onForgetPasswordClicked() {
+	if pe.onForgetPassword != nil && pe.currentProfile != nil {
+		pe.onForgetPassword(pe.currentProfile)
 	}
 }
 
@@ -459,12 +508,19 @@ func (pe *ProfileEditor) setFieldsEnabled(enabled bool) {
 	pe.setRoutesRow.SetSensitive(enabled)
 	pe.halfInternetRow.SetSensitive(enabled)
 	pe.autoReconnectRow.SetSensitive(enabled)
+	pe.forgetPasswordButton.SetSensitive(enabled)
 	pe.saveButton.SetSensitive(enabled && pe.isDirty)
 }
 
 // OnSave registers a callback for when the profile is saved.
 func (pe *ProfileEditor) OnSave(callback func(p *profile.Profile)) {
 	pe.onSave = callback
+}
+
+// OnForgetPassword registers a callback for when the user asks to forget the
+// current profile's saved password.
+func (pe *ProfileEditor) OnForgetPassword(callback func(p *profile.Profile)) {
+	pe.onForgetPassword = callback
 }
 
 // MarkNewProfile marks the current profile as new (unsaved) and enables the save button.

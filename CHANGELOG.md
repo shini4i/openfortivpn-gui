@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A "Saved Password" row in the profile editor's Authentication section, with a
+  **Forget** button that removes the profile's password from the system keyring
+  so the next connection prompts for it again. This is the only way to replace a
+  stored password on a 2FA profile: openfortivpn reports a rejected one-time
+  token with the same error as a rejected password, so those profiles are
+  excluded from the automatic discard.
+
 ### Changed
 
 - The username, realm and trusted-certificate fields are now checked for

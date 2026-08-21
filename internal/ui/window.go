@@ -50,6 +50,7 @@ type MainWindow struct {
 	deps   *MainWindowDeps
 
 	// UI components
+	toastOverlay  *adw.ToastOverlay
 	splitView     *adw.NavigationSplitView
 	profileList   *ProfileList
 	profileEditor *ProfileEditor
@@ -84,6 +85,10 @@ type MainWindow struct {
 	// injectable so tests can drive handlers that report failures without
 	// constructing GTK widgets.
 	presentError func(title, message string)
+
+	// presentToast shows a transient confirmation. It defaults to showToast and
+	// is injectable for the same reason as presentError.
+	presentToast func(message string)
 }
 
 // NewMainWindow creates a new main window instance.
@@ -93,6 +98,7 @@ func NewMainWindow(app *adw.Application, deps *MainWindowDeps) *MainWindow {
 		scheduleOnMain: func(fn func()) { glib.IdleAdd(fn) },
 	}
 	w.presentError = w.showError
+	w.presentToast = w.showToast
 
 	w.setupWindow(app)
 	w.setupLayout()
@@ -144,7 +150,12 @@ func (w *MainWindow) setupLayout() {
 	breakpoint.AddSetter(w.splitView, "collapsed", true)
 	w.window.AddBreakpoint(breakpoint)
 
-	w.window.SetContent(w.splitView)
+	// Toast overlay wraps the whole content so transient confirmations are
+	// visible from either pane of the split view.
+	w.toastOverlay = adw.NewToastOverlay()
+	w.toastOverlay.SetChild(w.splitView)
+
+	w.window.SetContent(w.toastOverlay)
 }
 
 // createSidebarPage creates the navigation page for the sidebar.
@@ -279,6 +290,9 @@ func (w *MainWindow) setupCallbacks() {
 	w.profileList.OnProfileDeleted(func(p *profile.Profile) {
 		w.onDeleteProfile(p)
 	})
+
+	// Saved password removal callback
+	w.profileEditor.OnForgetPassword(w.onForgetPassword)
 
 	// VPN state change callback
 	w.deps.VPNController.OnStateChange(w.handleStateChange)
@@ -592,6 +606,53 @@ func (w *MainWindow) performDeleteProfile(p *profile.Profile) {
 	w.loadProfiles()
 }
 
+// onForgetPassword asks for confirmation before dropping a profile's stored
+// password.
+func (w *MainWindow) onForgetPassword(p *profile.Profile) {
+	if p == nil {
+		return
+	}
+
+	dialog := adw.NewAlertDialog("Forget Saved Password?", "")
+	dialog.SetBody("The password stored for \"" + p.Name + "\" will be removed from the system keyring. " +
+		"You will be asked for it the next time you connect.")
+	dialog.AddResponse("cancel", "Cancel")
+	dialog.AddResponse("forget", "Forget")
+	dialog.SetResponseAppearance("forget", adw.ResponseDestructive)
+	dialog.SetDefaultResponse("cancel")
+	dialog.SetCloseResponse("cancel")
+
+	dialog.ConnectResponse(func(response string) {
+		if response == "forget" {
+			w.forgetSavedPassword(p)
+		}
+	})
+
+	dialog.Present(w.window)
+}
+
+// forgetSavedPassword removes the profile's password from the keyring so the
+// next connect prompts for it again. It is the only way to replace a stored
+// password for an OTP profile, which discardRejectedPassword deliberately
+// leaves alone.
+func (w *MainWindow) forgetSavedPassword(p *profile.Profile) {
+	if p == nil || w.deps.KeyringStore == nil {
+		return
+	}
+
+	if err := w.deps.KeyringStore.Delete(p.ID); err != nil {
+		slog.Warn("Failed to forget saved password", "profile_id", p.ID, "error", err)
+		w.presentError("Error Forgetting Password", err.Error())
+		return
+	}
+
+	// Nothing else about the window changes, so this is the only sign the
+	// action took effect.
+	w.presentToast("Saved password forgotten")
+
+	slog.Info("Forgot saved password; the next connection will prompt again", "profile_id", p.ID)
+}
+
 // onConnectClicked handles the connect/disconnect button click.
 func (w *MainWindow) onConnectClicked() {
 	state := w.deps.VPNController.GetState()
@@ -817,6 +878,14 @@ func (w *MainWindow) showError(title, message string) {
 	dialog.AddResponse("ok", "OK")
 	dialog.SetDefaultResponse("ok")
 	dialog.Present(w.window)
+}
+
+// showToast displays a transient confirmation over the window content.
+func (w *MainWindow) showToast(message string) {
+	if w.toastOverlay == nil {
+		return
+	}
+	w.toastOverlay.AddToast(adw.NewToast(message))
 }
 
 // Present shows the main window.
