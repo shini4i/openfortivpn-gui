@@ -17,10 +17,6 @@ type PreferencesWindow struct {
 	// Callbacks
 	onNotificationsChanged func(enabled bool)
 	onAutoConnectChanged   func(enabled bool)
-
-	// Track previous state to detect changes
-	prevNotifications bool
-	prevAutoConnect   bool
 }
 
 // NewPreferencesWindow creates a new preferences window.
@@ -57,7 +53,6 @@ func (pw *PreferencesWindow) setupWindow(parent *MainWindow) {
 	pw.notificationsSwitch.SetTitle("Desktop Notifications")
 	pw.notificationsSwitch.SetSubtitle("Show notifications for VPN state changes")
 	pw.notificationsSwitch.SetActive(true)
-	pw.prevNotifications = true
 	behaviorGroup.Add(pw.notificationsSwitch)
 
 	// Auto-connect switch
@@ -65,34 +60,23 @@ func (pw *PreferencesWindow) setupWindow(parent *MainWindow) {
 	pw.autoConnectSwitch.SetTitle("Auto-Connect on Startup")
 	pw.autoConnectSwitch.SetSubtitle("Automatically connect to the last used profile")
 	pw.autoConnectSwitch.SetActive(false)
-	pw.prevAutoConnect = false
 	behaviorGroup.Add(pw.autoConnectSwitch)
 
 	generalPage.Add(behaviorGroup)
 	pw.window.Add(generalPage) //nolint:staticcheck // PreferencesDialog not yet available
 
-	// Handle window close to trigger callbacks
-	pw.window.ConnectCloseRequest(func() bool {
-		pw.handleClose()
-		return false // Allow close
-	})
-}
-
-// handleClose is called when the preferences window is closed.
-func (pw *PreferencesWindow) handleClose() {
-	// Check for notification changes
-	if pw.notificationsSwitch.Active() != pw.prevNotifications {
+	// Report each toggle as it happens, so a setting is persisted even if the
+	// application exits while this window is still open.
+	pw.notificationsSwitch.NotifyProperty("active", func() {
 		if pw.onNotificationsChanged != nil {
 			pw.onNotificationsChanged(pw.notificationsSwitch.Active())
 		}
-	}
-
-	// Check for auto-connect changes
-	if pw.autoConnectSwitch.Active() != pw.prevAutoConnect {
+	})
+	pw.autoConnectSwitch.NotifyProperty("active", func() {
 		if pw.onAutoConnectChanged != nil {
 			pw.onAutoConnectChanged(pw.autoConnectSwitch.Active())
 		}
-	}
+	})
 }
 
 // Present shows the preferences window.
@@ -100,16 +84,17 @@ func (pw *PreferencesWindow) Present() {
 	pw.window.Present()
 }
 
-// SetNotificationsEnabled sets the notifications toggle state.
+// SetNotificationsEnabled sets the notifications toggle state. Callers load
+// the stored value before registering a change callback, so this does not
+// report an edit.
 func (pw *PreferencesWindow) SetNotificationsEnabled(enabled bool) {
 	pw.notificationsSwitch.SetActive(enabled)
-	pw.prevNotifications = enabled
 }
 
-// SetAutoConnect sets the auto-connect toggle state.
+// SetAutoConnect sets the auto-connect toggle state. Callers load the stored
+// value before registering a change callback, so this does not report an edit.
 func (pw *PreferencesWindow) SetAutoConnect(enabled bool) {
 	pw.autoConnectSwitch.SetActive(enabled)
-	pw.prevAutoConnect = enabled
 }
 
 // OnNotificationsChanged registers a callback for notification setting changes.

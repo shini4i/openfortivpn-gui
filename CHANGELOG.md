@@ -50,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection is being re-established. It was only cleared on disconnect and
   failure, so the previous tunnel's address stayed visible under
   "Connecting…" and "Reconnecting…".
+- Preference changes are saved as soon as they are toggled. They were only
+  written when the preferences window was closed, so quitting from the tray
+  with it still open discarded the change.
 
 ## [0.3.6] - 2026-07-27
 
