@@ -306,6 +306,8 @@ func (w *MainWindow) setupCallbacks() {
 // state and crashes the process with a SIGSEGV. All work is therefore marshaled
 // onto the main thread via scheduleOnMain.
 func (w *MainWindow) handleStateChange(oldState, newState vpn.ConnectionState) {
+	w.countConnection(newState)
+
 	connection := w.connection.current()
 	w.scheduleOnMain(func() {
 		if !w.connection.isCurrent(connection) {
@@ -393,6 +395,16 @@ func (w *MainWindow) handleError(err error) {
 		w.discardRejectedPassword(err)
 		w.presentError("VPN Error", err.Error())
 	})
+}
+
+// countConnection records a newly announced connection. Counting it here rather
+// than at the connect call is deliberate: the controller announces Connecting
+// while it holds off the previous attempt's callbacks, so a callback still in
+// flight cannot read this connection's count and pass for it later.
+func (w *MainWindow) countConnection(newState vpn.ConnectionState) {
+	if newState == vpn.StateConnecting {
+		w.connection.begin()
+	}
 }
 
 // releaseConnectingProfile forgets the in-flight profile once its attempt has
@@ -725,10 +737,8 @@ func (w *MainWindow) showOTPDialog(p *profile.Profile, password string) {
 
 // doConnect performs the actual VPN connection.
 func (w *MainWindow) doConnect(p *profile.Profile, opts *vpn.ConnectOptions) {
-	// Remember whose credentials are in play so a rejection can invalidate them,
-	// and mark this as the connection whose callbacks may act on the UI.
+	// Remember whose credentials are in play so a rejection can invalidate them.
 	w.connectingProfile = p
-	w.connection.begin()
 
 	// Clear previous logs
 	w.logDialog.Clear()

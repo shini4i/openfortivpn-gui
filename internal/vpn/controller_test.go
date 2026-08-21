@@ -1735,6 +1735,18 @@ func TestController_BeginAttempt_WaitsForInFlightDispatch(t *testing.T) {
 		sequence = append(sequence, step)
 	}
 
+	// Consumers tell one connection's callbacks from the next by counting the
+	// Connecting announcements, so an in-flight dispatch must not see a newer
+	// one arrive — that is what would let it pass for the retry later.
+	var announced, observed int
+	ctrl.OnStateChange(func(_, newState ConnectionState) {
+		if newState == StateConnecting {
+			mu.Lock()
+			announced++
+			mu.Unlock()
+		}
+	})
+
 	dispatching := make(chan struct{})
 	ctrl.OnEvent(func(*OutputEvent) {
 		record("dispatch:start")
@@ -1742,6 +1754,9 @@ func TestController_BeginAttempt_WaitsForInFlightDispatch(t *testing.T) {
 		// Stand in for a callback the retry could race: a keyring delete, a
 		// browser launch, or a socket write to the GUI.
 		time.Sleep(100 * time.Millisecond)
+		mu.Lock()
+		observed = announced
+		mu.Unlock()
 		record("dispatch:end")
 	})
 
@@ -1761,4 +1776,7 @@ func TestController_BeginAttempt_WaitsForInFlightDispatch(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, []string{"dispatch:start", "dispatch:end", "retry:begun"}, sequence,
 		"a retry must not be stamped while the previous attempt is still dispatching")
+	assert.Equal(t, 1, observed,
+		"an in-flight callback must not see the retry announced, or it would pass for it")
+	assert.Equal(t, 2, announced)
 }

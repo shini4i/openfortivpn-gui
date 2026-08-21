@@ -520,13 +520,11 @@ func (a *App) ensureWindow() {
 		reconnectManager.SetPasswordProvider(a.keyringStore)
 		reconnectManager.SetContext(a.ctx)
 		reconnectManager.SetConnectFunc(func(ctx context.Context, p *profile.Profile, password string) error {
-			// Record the in-flight profile and connection as doConnect does.
-			// This path calls the controller directly, so without it a password
-			// rejected on an automatic attempt could not be invalidated, and the
-			// previous connection's callbacks would still be accepted.
+			// Record the in-flight profile as doConnect does. This path calls
+			// the controller directly, so without it a password rejected on an
+			// automatic attempt could not be invalidated.
 			if a.window != nil {
 				a.window.connectingProfile = p
-				a.window.connection.begin()
 			}
 			opts := &vpn.ConnectOptions{Password: password}
 			return a.vpnController.Connect(ctx, p, opts)

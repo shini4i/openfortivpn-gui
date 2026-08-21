@@ -317,3 +317,29 @@ func TestConnectionCounter(t *testing.T) {
 	assert.True(t, counter.isCurrent(second))
 	assert.False(t, counter.isCurrent(first), "the earlier connection is superseded")
 }
+
+// TestMainWindow_CountConnection pins which state starts a new connection count.
+// Only the controller's Connecting announcement does, since that is the one
+// delivered while the previous attempt's callbacks are held off.
+func TestMainWindow_CountConnection(t *testing.T) {
+	w := &MainWindow{}
+
+	w.countConnection(vpn.StateConnecting)
+	first := w.connection.current()
+	assert.NotZero(t, first)
+
+	for _, state := range []vpn.ConnectionState{
+		vpn.StateConnected,
+		vpn.StateAuthenticating,
+		vpn.StateReconnecting,
+		vpn.StateFailed,
+		vpn.StateDisconnected,
+	} {
+		w.countConnection(state)
+		assert.Equal(t, first, w.connection.current(),
+			"%s must not start a new connection count", state)
+	}
+
+	w.countConnection(vpn.StateConnecting)
+	assert.NotEqual(t, first, w.connection.current(), "a retry starts a new count")
+}

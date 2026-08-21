@@ -167,7 +167,10 @@ func (c *Controller) beginAttempt() (uint64, error) {
 	callback := c.onStateChange
 	c.mu.Unlock()
 
-	// Call callback outside of lock to prevent deadlocks
+	// Called outside mu to prevent deadlocks, but still under dispatch: a
+	// consumer may use this announcement to tell one connection's callbacks
+	// from the next one's, which only holds while the previous attempt's
+	// dispatch is held off.
 	if callback != nil {
 		callback(oldState, StateConnecting)
 	}
