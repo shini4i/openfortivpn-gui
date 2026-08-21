@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- On hosts with no `resolvconf` binary, the VPN's DNS servers are now applied
+  when connecting through the helper daemon. The helper's systemd sandbox
+  mounted the whole filesystem read-only, so openfortivpn could not update
+  `/etc/resolv.conf`: the tunnel came up but the gateway's name servers were
+  silently ignored, leaving DNS queries on the host's original resolvers.
+  Hosts that provide `resolvconf` — which includes anything running
+  systemd-resolved — were unaffected, as openfortivpn uses that instead.
+- Closed a race in the system tray's startup that could abort the application.
+  Tray menu entries were created on the tray's own thread while the main window
+  could already be updating them, so an update could reach an entry that did
+  not exist yet. Whether it did depended on thread timing.
+
 ## [0.3.6] - 2026-07-27
 
 ### Fixed

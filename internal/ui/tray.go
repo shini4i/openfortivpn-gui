@@ -35,6 +35,18 @@ var (
 	ErrTrayMissingCallbacks = errors.New("all callbacks (OnConnect, OnDisconnect, OnShow, OnQuit) must be set before calling Run()")
 )
 
+// trayMenu holds the tray's menu entries. onReady creates them together and
+// publishes them as one value, so every entry is either set or the whole menu
+// is still unpublished; status therefore doubles as the "menu is ready" flag.
+type trayMenu struct {
+	status      *systray.MenuItem
+	trafficRate *systray.MenuItem
+	connect     *systray.MenuItem
+	disconnect  *systray.MenuItem
+	show        *systray.MenuItem
+	quit        *systray.MenuItem
+}
+
 // TrayIcon manages the system tray icon and menu.
 type TrayIcon struct {
 	mu sync.RWMutex
@@ -43,13 +55,8 @@ type TrayIcon struct {
 	state       vpn.ConnectionState
 	profileName string
 
-	// Menu items
-	menuStatus      *systray.MenuItem
-	menuTrafficRate *systray.MenuItem
-	menuConnect     *systray.MenuItem
-	menuDisconnect  *systray.MenuItem
-	menuShow        *systray.MenuItem
-	menuQuit        *systray.MenuItem
+	// Menu entries; zero until onReady publishes them.
+	menu trayMenu
 
 	// Callbacks - must be set before Run() is called
 	onConnect    func()
@@ -148,15 +155,16 @@ func (t *TrayIcon) SetProfileName(name string) {
 
 // SetStats updates the traffic rate display in the tray menu.
 func (t *TrayIcon) SetStats(s stats.NetworkStats) {
-	if t.menuTrafficRate == nil {
-		return
+	_, _, menu := t.snapshot()
+	if menu.status == nil {
+		return // Menu not published yet
 	}
 
 	rateText := fmt.Sprintf("↓ %s  ↑ %s",
 		stats.FormatRate(s.RxBytesPerSec),
 		stats.FormatRate(s.TxBytesPerSec))
 
-	t.menuTrafficRate.SetTitle(rateText)
+	menu.trafficRate.SetTitle(rateText)
 }
 
 // Run starts the system tray icon. This should be called in a goroutine
@@ -201,23 +209,31 @@ func (t *TrayIcon) onReady() {
 	systray.SetTooltip("OpenFortiVPN GUI - Disconnected")
 
 	// Create menu items
-	t.menuStatus = systray.AddMenuItem("Status: Disconnected", "Current connection status")
-	t.menuStatus.Disable()
+	status := systray.AddMenuItem("Status: Disconnected", "Current connection status")
+	status.Disable()
 
-	t.menuTrafficRate = systray.AddMenuItem("", "Current traffic rates")
-	t.menuTrafficRate.Disable()
-	t.menuTrafficRate.Hide()
-
-	systray.AddSeparator()
-
-	t.menuConnect = systray.AddMenuItem("Connect", "Connect to VPN")
-	t.menuDisconnect = systray.AddMenuItem("Disconnect", "Disconnect from VPN")
-	t.menuDisconnect.Disable()
+	trafficRate := systray.AddMenuItem("", "Current traffic rates")
+	trafficRate.Disable()
+	trafficRate.Hide()
 
 	systray.AddSeparator()
 
-	t.menuShow = systray.AddMenuItem("Show Window", "Show the main window")
-	t.menuQuit = systray.AddMenuItem("Quit", "Quit the application")
+	connect := systray.AddMenuItem("Connect", "Connect to VPN")
+	disconnect := systray.AddMenuItem("Disconnect", "Disconnect from VPN")
+	disconnect.Disable()
+
+	systray.AddSeparator()
+
+	show := systray.AddMenuItem("Show Window", "Show the main window")
+	quit := systray.AddMenuItem("Quit", "Quit the application")
+
+	// Publish the finished menu as a unit. Until this returns, readers on the
+	// GTK main thread see no menu at all rather than a partially built one.
+	t.publishMenu(trayMenu{
+		status: status, trafficRate: trafficRate,
+		connect: connect, disconnect: disconnect,
+		show: show, quit: quit,
+	})
 
 	// Handle menu clicks in a goroutine
 	go t.handleMenuClicks()
@@ -230,34 +246,59 @@ func (t *TrayIcon) onExit() {
 	slog.Info("System tray closed")
 }
 
-// handleMenuClicks processes menu item clicks.
+// publishMenu stores the menu in a single critical section. onReady builds it
+// on the systray goroutine while the GTK main thread may already be pushing
+// updates, so publishing entry by entry would both race those readers and
+// expose a half-built menu.
+func (t *TrayIcon) publishMenu(m trayMenu) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.menu = m
+}
+
+// snapshot reads the state, profile name and menu together under the lock, so
+// a reader cannot mix a new state with a stale menu.
+func (t *TrayIcon) snapshot() (vpn.ConnectionState, string, trayMenu) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.state, t.profileName, t.menu
+}
+
+// handleMenuClicks processes menu item clicks. It is started by onReady once
+// the menu is published, so the entries it reads are already final.
 func (t *TrayIcon) handleMenuClicks() {
+	_, _, menu := t.snapshot()
+	if menu.status == nil {
+		slog.Error("Tray click handler started before the menu was published")
+		return
+	}
+
 	for {
 		select {
 		case <-t.done:
 			return
-		case _, ok := <-t.menuConnect.ClickedCh:
+		case _, ok := <-menu.connect.ClickedCh:
 			if !ok {
 				return
 			}
 			if t.onConnect != nil {
 				t.onConnect()
 			}
-		case _, ok := <-t.menuDisconnect.ClickedCh:
+		case _, ok := <-menu.disconnect.ClickedCh:
 			if !ok {
 				return
 			}
 			if t.onDisconnect != nil {
 				t.onDisconnect()
 			}
-		case _, ok := <-t.menuShow.ClickedCh:
+		case _, ok := <-menu.show.ClickedCh:
 			if !ok {
 				return
 			}
 			if t.onShow != nil {
 				t.onShow()
 			}
-		case _, ok := <-t.menuQuit.ClickedCh:
+		case _, ok := <-menu.quit.ClickedCh:
 			if !ok {
 				return
 			}
@@ -270,14 +311,10 @@ func (t *TrayIcon) handleMenuClicks() {
 
 // updateIcon updates the tray icon based on current state.
 func (t *TrayIcon) updateIcon() {
-	if t.menuStatus == nil {
+	state, profileName, menu := t.snapshot()
+	if menu.status == nil {
 		return // Not initialized yet
 	}
-
-	t.mu.RLock()
-	state := t.state
-	profileName := t.profileName
-	t.mu.RUnlock()
 
 	var icon []byte
 	var tooltip string
@@ -303,14 +340,10 @@ func (t *TrayIcon) updateIcon() {
 
 // updateMenu updates the menu items based on current state.
 func (t *TrayIcon) updateMenu() {
-	if t.menuStatus == nil {
+	state, profileName, menu := t.snapshot()
+	if menu.status == nil {
 		return // Not initialized yet
 	}
-
-	t.mu.RLock()
-	state := t.state
-	profileName := t.profileName
-	t.mu.RUnlock()
 
 	// Update status text
 	var statusText string
@@ -331,35 +364,33 @@ func (t *TrayIcon) updateMenu() {
 	default:
 		statusText = "Status: Disconnected"
 	}
-	t.menuStatus.SetTitle(statusText)
+	menu.status.SetTitle(statusText)
 
 	// Show/hide traffic rate based on connection state
-	if t.menuTrafficRate != nil {
-		if state == vpn.StateConnected {
-			t.menuTrafficRate.Show()
-		} else {
-			t.menuTrafficRate.Hide()
-		}
+	if state == vpn.StateConnected {
+		menu.trafficRate.Show()
+	} else {
+		menu.trafficRate.Hide()
 	}
 
 	// Update connect menu item to show which profile will be used
 	if profileName != "" && state.CanConnect() {
-		t.menuConnect.SetTitle(fmt.Sprintf("Connect (%s)", profileName))
+		menu.connect.SetTitle(fmt.Sprintf("Connect (%s)", profileName))
 	} else {
-		t.menuConnect.SetTitle("Connect")
+		menu.connect.SetTitle("Connect")
 	}
 
 	// Enable/disable connect/disconnect based on state
 	if state.CanConnect() {
-		t.menuConnect.Enable()
+		menu.connect.Enable()
 	} else {
-		t.menuConnect.Disable()
+		menu.connect.Disable()
 	}
 
 	if state.CanDisconnect() {
-		t.menuDisconnect.Enable()
+		menu.disconnect.Enable()
 	} else {
-		t.menuDisconnect.Disable()
+		menu.disconnect.Disable()
 	}
 }
 
