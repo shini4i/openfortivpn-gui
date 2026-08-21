@@ -39,6 +39,12 @@ type Controller struct {
 	// written after the controller's first Connect. Tests shorten it before.
 	outputDrainTimeout time.Duration
 
+	// Held for reading while an attempt dispatches callbacks, and for writing
+	// while a new attempt starts, so a superseded attempt can never deliver a
+	// callback to a newer connection. Always taken before mu, and never held by
+	// a callback that calls Connect — that would deadlock against beginAttempt.
+	dispatch sync.RWMutex
+
 	mu            sync.RWMutex
 	state         ConnectionState
 	assignedIP    string
@@ -141,8 +147,12 @@ func (c *Controller) transition(newState ConnectionState, allowed func(current C
 
 // beginAttempt transitions to Connecting and stamps the new attempt in the same
 // critical section, so no completion goroutine can mistake the attempt starting
-// here for its own. Returns the attempt's identifier.
+// here for its own. It first waits for any in-flight dispatch of the previous
+// attempt to finish. Returns the attempt's identifier.
 func (c *Controller) beginAttempt() (uint64, error) {
+	c.dispatch.Lock()
+	defer c.dispatch.Unlock()
+
 	c.mu.Lock()
 	if !IsValidTransition(c.state, StateConnecting) {
 		oldState := c.state
@@ -316,6 +326,11 @@ func (c *Controller) processOutput(attempt uint64, line string) {
 	if event == nil {
 		return
 	}
+
+	// Held across the dispatch: a retry starting midway through would otherwise
+	// receive this attempt's callbacks.
+	c.dispatch.RLock()
+	defer c.dispatch.RUnlock()
 
 	if !c.isCurrentAttempt(attempt) {
 		slog.Debug("Ignoring event from a superseded connection attempt",
@@ -735,6 +750,9 @@ func (c *Controller) handleProcessCompletion(attempt uint64, process Process, ou
 // drain can fail this attempt — freeing the UI to start the next one — in the
 // gap between the two.
 func (c *Controller) reportDisconnected(attempt uint64) {
+	c.dispatch.RLock()
+	defer c.dispatch.RUnlock()
+
 	live := func(current ConnectionState) bool {
 		return c.attempt == attempt &&
 			(current == StateConnected || current == StateConnecting || current == StateAuthenticating)

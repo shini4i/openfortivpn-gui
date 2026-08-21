@@ -1719,3 +1719,46 @@ func TestController_ProcessOutput_IgnoresSupersededAttempt(t *testing.T) {
 	assert.Empty(t, errs, "no error dialog, and no password discarded, for a dead attempt")
 	assert.Equal(t, []string{"connecting", "failed", "connecting"}, states)
 }
+
+// TestController_BeginAttempt_WaitsForInFlightDispatch pins the boundary between
+// one attempt's callbacks and the next attempt's existence: a callback already
+// running when the user retries must finish before the retry is stamped, or it
+// would be acting on behalf of a connection that no longer exists.
+func TestController_BeginAttempt_WaitsForInFlightDispatch(t *testing.T) {
+	ctrl := NewController("/usr/bin/openfortivpn")
+
+	var mu sync.Mutex
+	var sequence []string
+	record := func(step string) {
+		mu.Lock()
+		defer mu.Unlock()
+		sequence = append(sequence, step)
+	}
+
+	dispatching := make(chan struct{})
+	ctrl.OnEvent(func(*OutputEvent) {
+		record("dispatch:start")
+		close(dispatching)
+		// Stand in for a callback the retry could race: a keyring delete, a
+		// browser launch, or a socket write to the GUI.
+		time.Sleep(100 * time.Millisecond)
+		record("dispatch:end")
+	})
+
+	attempt, err := ctrl.beginAttempt()
+	require.NoError(t, err)
+
+	go ctrl.processOutput(attempt, "Got addresses: [10.0.0.50], ns [10.0.0.1]")
+
+	<-dispatching
+	require.NoError(t, ctrl.setState(StateFailed))
+
+	_, err = ctrl.beginAttempt()
+	require.NoError(t, err)
+	record("retry:begun")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"dispatch:start", "dispatch:end", "retry:begun"}, sequence,
+		"a retry must not be stamped while the previous attempt is still dispatching")
+}
