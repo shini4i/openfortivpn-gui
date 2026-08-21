@@ -1,8 +1,11 @@
 package vpn
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -178,7 +181,7 @@ func TestController_ProcessOutput(t *testing.T) {
 	})
 
 	// Process tunnel up message
-	ctrl.processOutput("Tunnel is up and running.")
+	ctrl.processOutput(ctrl.attempt, "Tunnel is up and running.")
 
 	mu.Lock()
 	require.Len(t, events, 1)
@@ -192,7 +195,7 @@ func TestController_ProcessOutput_GotIP(t *testing.T) {
 	ctrl := NewController("/usr/bin/openfortivpn")
 	_ = ctrl.setState(StateConnecting)
 
-	ctrl.processOutput("Got addresses: [10.0.0.50], ns [10.0.0.1]")
+	ctrl.processOutput(ctrl.attempt, "Got addresses: [10.0.0.50], ns [10.0.0.1]")
 
 	assert.Equal(t, "10.0.0.50", ctrl.GetAssignedIP())
 }
@@ -210,7 +213,7 @@ func TestController_ProcessOutput_Error(t *testing.T) {
 		lastError = err.Error()
 	})
 
-	ctrl.processOutput("ERROR:  VPN authentication failed.")
+	ctrl.processOutput(ctrl.attempt, "ERROR:  VPN authentication failed.")
 
 	mu.Lock()
 	assert.Contains(t, lastError, "VPN authentication failed")
@@ -588,7 +591,7 @@ func TestController_ProcessOutput_Authenticate(t *testing.T) {
 		events = append(events, event)
 	})
 
-	ctrl.processOutput("Authenticate at 'https://sso.example.com/auth?session=abc'")
+	ctrl.processOutput(ctrl.attempt, "Authenticate at 'https://sso.example.com/auth?session=abc'")
 
 	mu.Lock()
 	require.Len(t, events, 1)
@@ -688,7 +691,7 @@ func TestController_StateTransitionOnDisconnect(t *testing.T) {
 	})
 
 	// Process disconnect event
-	ctrl.processOutput("Tunnel is down.")
+	ctrl.processOutput(ctrl.attempt, "Tunnel is down.")
 
 	// Verify state transition (synchronous, no sleep needed)
 	mu.Lock()
@@ -772,6 +775,7 @@ func TestController_Connect_ProcessCreateError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to create process")
 	assert.Equal(t, StateFailed, ctrl.GetState())
+	assert.Error(t, executor.GetLastCtx().Err(), "the failed attempt must release its context")
 }
 
 func TestController_Connect_ProcessStartError(t *testing.T) {
@@ -794,6 +798,7 @@ func TestController_Connect_ProcessStartError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to start openfortivpn")
 	assert.Equal(t, StateFailed, ctrl.GetState())
+	assert.Error(t, executor.GetLastCtx().Err(), "the failed attempt must release its context")
 }
 
 func TestController_Connect_PasswordWrittenToStdin(t *testing.T) {
@@ -1168,11 +1173,610 @@ func TestController_ProcessOutput_Error_EmitsErrorBeforeStateChange(t *testing.T
 		sequence = append(sequence, "state:"+string(newState))
 	})
 
-	ctrl.processOutput(
+	ctrl.processOutput(ctrl.attempt,
 		"ERROR:  Could not authenticate to gateway. Please check the password, client certificate, etc.")
 
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, []string{"error", "state:failed"}, sequence,
 		"the error must reach the UI before the profile is forgotten")
+}
+
+// TestController_ProcessCompletion_WaitsForPendingOutput pins the ordering the
+// UI depends on: the last output line reaches the callbacks before the terminal
+// state does. The connection outlives outputDrainTimeout on purpose, since the
+// bound must be measured from the process exit, not from the connect.
+func TestController_ProcessCompletion_WaitsForPendingOutput(t *testing.T) {
+	const drainTimeout = 150 * time.Millisecond
+
+	proc := newFakeProcess()
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(&fakeExecutor{processes: []Process{proc}}))
+	ctrl.outputDrainTimeout = drainTimeout
+
+	var mu sync.Mutex
+	var sequence []string
+	ctrl.OnOutput(func(string) {
+		mu.Lock()
+		defer mu.Unlock()
+		sequence = append(sequence, "output")
+	})
+	ctrl.OnError(func(error) {
+		mu.Lock()
+		defer mu.Unlock()
+		sequence = append(sequence, "error")
+	})
+	ctrl.OnStateChange(func(_, newState ConnectionState) {
+		mu.Lock()
+		defer mu.Unlock()
+		sequence = append(sequence, "state:"+string(newState))
+	})
+
+	p := &profile.Profile{
+		ID:         "550e8400-e29b-41d4-a716-446655440000",
+		Name:       "Test VPN",
+		Host:       "vpn.example.com",
+		Port:       443,
+		Username:   "testuser",
+		AuthMethod: profile.AuthMethodPassword,
+		SetDNS:     true,
+		SetRoutes:  true,
+	}
+
+	// The final error line becomes readable exactly when the process is reaped,
+	// so the drain is what decides whether it is seen at all.
+	proc.onWait = func() {
+		proc.stderr.deliver("ERROR:  Could not authenticate to gateway. Please check the password, client certificate, etc.")
+		proc.stdout.deliver()
+	}
+
+	err := ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "wrongpassword"})
+	require.NoError(t, err)
+
+	// A session longer than the drain bound, with the pipes quiet throughout.
+	time.Sleep(2 * drainTimeout)
+
+	proc.exit()
+
+	require.Eventually(t, func() bool {
+		return ctrl.GetState() == StateFailed
+	}, time.Second, 10*time.Millisecond)
+
+	// Join the completion goroutine before the test ends, so its pipe cleanup is
+	// not still in flight.
+	require.Eventually(t, func() bool {
+		return proc.stdout.isClosed() && proc.stderr.isClosed()
+	}, time.Second, 10*time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"state:connecting", "output", "error", "state:failed"}, sequence,
+		"the final line must reach the UI before the connection reaches a terminal state")
+}
+
+// TestController_ProcessCompletion_BoundedOutputDrain verifies that output pipes
+// which never reach EOF cannot wedge the state machine: a grandchild that
+// inherited them keeps them open after openfortivpn itself is gone, so the drain
+// is bounded, the pipes are closed, and the terminal state still arrives.
+func TestController_ProcessCompletion_BoundedOutputDrain(t *testing.T) {
+	proc := newFakeProcess()
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(&fakeExecutor{processes: []Process{proc}}))
+	ctrl.outputDrainTimeout = 50 * time.Millisecond
+
+	var mu sync.Mutex
+	var emittedErrors []string
+	ctrl.OnError(func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		emittedErrors = append(emittedErrors, err.Error())
+	})
+
+	p := &profile.Profile{
+		ID:         "550e8400-e29b-41d4-a716-446655440000",
+		Name:       "Test VPN",
+		Host:       "vpn.example.com",
+		Port:       443,
+		Username:   "testuser",
+		AuthMethod: profile.AuthMethodPassword,
+		SetDNS:     true,
+		SetRoutes:  true,
+	}
+
+	err := ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "password"})
+	require.NoError(t, err)
+
+	// Process exits, but nothing ever closes the output pipes.
+	proc.exit()
+
+	assert.Eventually(t, func() bool {
+		return ctrl.GetState() == StateDisconnected
+	}, time.Second, 10*time.Millisecond)
+
+	assert.True(t, proc.stdout.isClosed(), "the abandoned stdout pipe must be released")
+	assert.True(t, proc.stderr.isClosed(), "the abandoned stderr pipe must be released")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Empty(t, emittedErrors, "closing our own pipes is not a failure worth reporting")
+}
+
+// gatedReader emulates one output pipe of a process: Read blocks while the pipe
+// is open and empty, and once closed it reports os.ErrClosed the way a closed
+// *os.File does, discarding anything not yet read.
+type gatedReader struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	buf    []byte
+	eof    bool
+	closed bool
+}
+
+func newGatedReader() *gatedReader {
+	r := &gatedReader{}
+	r.cond = sync.NewCond(&r.mu)
+	return r
+}
+
+func (r *gatedReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for len(r.buf) == 0 && !r.eof && !r.closed {
+		r.cond.Wait()
+	}
+	if r.closed {
+		return 0, os.ErrClosed
+	}
+	if len(r.buf) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.buf)
+	r.buf = r.buf[n:]
+	return n, nil
+}
+
+func (r *gatedReader) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = true
+	r.cond.Broadcast()
+	return nil
+}
+
+func (r *gatedReader) isClosed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
+}
+
+// deliver makes the given lines readable and then ends the stream.
+func (r *gatedReader) deliver(lines ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, line := range lines {
+		r.buf = append(r.buf, line+"\n"...)
+	}
+	r.eof = true
+	r.cond.Broadcast()
+}
+
+// fakeProcess emulates the pipe contract newCmdWithPipes provides: the output
+// pipes survive Wait, so only the child's exit or an explicit Close ends them.
+// MockProcess cannot stand in here — its readers report EOF immediately, so it
+// cannot model output still pending when the process is reaped.
+type fakeProcess struct {
+	stdout   *gatedReader
+	stderr   *gatedReader
+	stdin    *mockWriteCloser
+	exited   chan struct{}
+	exitOnce sync.Once
+
+	// onWait runs inside Wait, just before it returns: whatever it delivers is
+	// pending at the instant the process is reaped.
+	onWait func()
+}
+
+func newFakeProcess() *fakeProcess {
+	return &fakeProcess{
+		stdout: newGatedReader(),
+		stderr: newGatedReader(),
+		stdin:  &mockWriteCloser{buf: &bytes.Buffer{}},
+		exited: make(chan struct{}),
+	}
+}
+
+// exit signals that the process has terminated.
+func (p *fakeProcess) exit() {
+	p.exitOnce.Do(func() { close(p.exited) })
+}
+
+func (p *fakeProcess) Start() error { return nil }
+
+func (p *fakeProcess) Wait() error {
+	<-p.exited
+	if p.onWait != nil {
+		p.onWait()
+	}
+	return nil
+}
+
+func (p *fakeProcess) Kill() error {
+	p.exit()
+	return nil
+}
+
+func (p *fakeProcess) Stdin() io.WriteCloser { return p.stdin }
+func (p *fakeProcess) Stdout() io.ReadCloser { return p.stdout }
+func (p *fakeProcess) Stderr() io.ReadCloser { return p.stderr }
+
+// fakeExecutor hands out preconstructed processes, one per CreateProcess call.
+// Running out is an error rather than a repeat: handing the same process back
+// twice would make the controller's ownership check trivially true.
+type fakeExecutor struct {
+	mu        sync.Mutex
+	processes []Process
+
+	// beforeCreate runs at the start of each CreateProcess call, which is the
+	// window where the attempt owns the state but has no process registered.
+	beforeCreate func(call int)
+	calls        int
+}
+
+func (e *fakeExecutor) CreateProcess(context.Context, string, ...string) (Process, error) {
+	e.mu.Lock()
+	hook := e.beforeCreate
+	e.calls++
+	call := e.calls
+	e.mu.Unlock()
+
+	if hook != nil {
+		hook(call)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.processes) == 0 {
+		return nil, errors.New("fakeExecutor: no process left to hand out")
+	}
+	process := e.processes[0]
+	e.processes = e.processes[1:]
+	return process, nil
+}
+
+// TestController_ProcessCompletion_DoesNotClobberNewerConnection covers the
+// window the bounded drain opens: a failed connection whose pipes are still held
+// open keeps its completion goroutine alive while the user reconnects. That
+// goroutine must leave the newer connection's state and process untouched.
+func TestController_ProcessCompletion_DoesNotClobberNewerConnection(t *testing.T) {
+	failed := newFakeProcess()
+	current := newFakeProcess()
+	ctrl := NewController("/usr/bin/openfortivpn",
+		WithExecutor(&fakeExecutor{processes: []Process{failed, current}}))
+	ctrl.outputDrainTimeout = 150 * time.Millisecond
+
+	p := &profile.Profile{
+		ID:         "550e8400-e29b-41d4-a716-446655440000",
+		Name:       "Test VPN",
+		Host:       "vpn.example.com",
+		Port:       443,
+		Username:   "testuser",
+		AuthMethod: profile.AuthMethodPassword,
+		SetDNS:     true,
+		SetRoutes:  true,
+	}
+
+	require.NoError(t, ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "wrongpassword"}))
+
+	// The first attempt fails and exits, but a descendant keeps stdout open, so
+	// its completion goroutine sits in the bounded drain.
+	failed.stderr.deliver("ERROR:  Could not authenticate to gateway. Please check the password, client certificate, etc.")
+	failed.exit()
+	assert.Eventually(t, func() bool {
+		return ctrl.GetState() == StateFailed
+	}, time.Second, 10*time.Millisecond)
+
+	// The user retries while the stale goroutine is still draining.
+	require.NoError(t, ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "rightpassword"}))
+	require.Equal(t, StateConnecting, ctrl.GetState())
+	t.Cleanup(current.exit)
+
+	// Closed pipes mean the stale goroutine is past its drain and has reached
+	// the ownership check — without this the assertions below pass vacuously.
+	require.Eventually(t, func() bool {
+		return failed.stdout.isClosed() && failed.stderr.isClosed()
+	}, time.Second, 10*time.Millisecond)
+
+	assert.Never(t, func() bool {
+		return ctrl.GetState() != StateConnecting
+	}, 100*time.Millisecond, 10*time.Millisecond,
+		"a stale completion goroutine must not report a terminal state for a newer connection")
+
+	ctrl.mu.RLock()
+	defer ctrl.mu.RUnlock()
+	assert.Same(t, current, ctrl.process, "the newer process must stay registered")
+	assert.NotNil(t, ctrl.stdin, "the newer connection's stdin must stay open")
+}
+
+// TestController_ScanOutput_ClosedPipeIsNotAnError pins that releasing our own
+// output pipes stays silent. The completion path closes them once the scanners
+// are done, and surfacing that as an error would pop a VPN error dialog after
+// every connection.
+func TestController_ScanOutput_ClosedPipeIsNotAnError(t *testing.T) {
+	ctrl := NewController("/usr/bin/openfortivpn")
+
+	var mu sync.Mutex
+	var emittedErrors []string
+	ctrl.OnError(func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		emittedErrors = append(emittedErrors, err.Error())
+	})
+
+	reader := newGatedReader()
+	require.NoError(t, reader.Close())
+
+	// An uncancelled context: the suppression must come from the error itself,
+	// not from a shutdown that happens to be in progress.
+	ctrl.scanOutput(context.Background(), ctrl.attempt, "stdout", reader)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Empty(t, emittedErrors)
+}
+
+// TestController_Disconnect_BoundedOutputDrain covers a user-initiated
+// disconnect whose output pipes outlive the process: the drain must still give
+// up on the bound so the UI learns the connection is gone.
+func TestController_Disconnect_BoundedOutputDrain(t *testing.T) {
+	proc := newFakeProcess()
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(&fakeExecutor{processes: []Process{proc}}))
+	ctrl.outputDrainTimeout = 50 * time.Millisecond
+
+	var mu sync.Mutex
+	var emittedErrors []string
+	ctrl.OnError(func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		emittedErrors = append(emittedErrors, err.Error())
+	})
+
+	p := &profile.Profile{
+		ID:         "550e8400-e29b-41d4-a716-446655440000",
+		Name:       "Test VPN",
+		Host:       "vpn.example.com",
+		Port:       443,
+		Username:   "testuser",
+		AuthMethod: profile.AuthMethodPassword,
+		SetDNS:     true,
+		SetRoutes:  true,
+	}
+
+	require.NoError(t, ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "password"}))
+
+	// Kill reaps the process, but a descendant keeps the pipes open.
+	require.NoError(t, ctrl.Disconnect(context.Background()))
+
+	require.Eventually(t, func() bool {
+		return ctrl.GetState() == StateDisconnected
+	}, time.Second, 10*time.Millisecond)
+
+	assert.True(t, proc.stdout.isClosed(), "the abandoned stdout pipe must be released")
+	assert.True(t, proc.stderr.isClosed(), "the abandoned stderr pipe must be released")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Empty(t, emittedErrors, "a requested disconnect is not a failure")
+}
+
+// TestController_ProcessCompletion_DoesNotClobberRetryBeforeItsProcessStarts
+// closes the narrow window a process-identity check leaves open: a retry owns
+// the state from the moment it reaches Connecting, but registers its process
+// only later. A stale completion goroutine waking in between must still stand
+// down, or the retry's live tunnel becomes unstoppable from the UI.
+func TestController_ProcessCompletion_DoesNotClobberRetryBeforeItsProcessStarts(t *testing.T) {
+	failed := newFakeProcess()
+	retried := newFakeProcess()
+	executor := &fakeExecutor{processes: []Process{failed, retried}}
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
+	ctrl.outputDrainTimeout = 50 * time.Millisecond
+
+	p := &profile.Profile{
+		ID:         "550e8400-e29b-41d4-a716-446655440000",
+		Name:       "Test VPN",
+		Host:       "vpn.example.com",
+		Port:       443,
+		Username:   "testuser",
+		AuthMethod: profile.AuthMethodPassword,
+		SetDNS:     true,
+		SetRoutes:  true,
+	}
+
+	// The retry parks inside CreateProcess — state already Connecting, no
+	// process registered — until the stale goroutine has had its say.
+	executor.beforeCreate = func(call int) {
+		if call != 2 {
+			return
+		}
+		failed.exit()
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if ctrl.GetState() != StateConnecting {
+				return // the stale goroutine reported a terminal state
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	require.NoError(t, ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "wrongpassword"}))
+
+	// The first attempt fails; its pipes stay open, so its completion goroutine
+	// is still alive when the retry starts.
+	failed.stderr.deliver("ERROR:  Could not authenticate to gateway. Please check the password, client certificate, etc.")
+	require.Eventually(t, func() bool {
+		return ctrl.GetState() == StateFailed
+	}, time.Second, 10*time.Millisecond)
+
+	require.NoError(t, ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "rightpassword"}))
+	t.Cleanup(retried.exit)
+
+	assert.Equal(t, StateConnecting, ctrl.GetState(),
+		"the retry must keep the state it claimed before its process was registered")
+
+	ctrl.mu.RLock()
+	defer ctrl.mu.RUnlock()
+	assert.Same(t, retried, ctrl.process, "the retry's process must stay registered")
+	assert.NotNil(t, ctrl.stdin, "the retry's stdin must stay open")
+}
+
+// TestController_ReportDisconnected_IgnoresStaleAttempt covers the gap between a
+// completion goroutine's ownership check and its state change: a scanner that
+// outlived the drain can fail the old attempt, which frees the UI to start the
+// next one. The stale goroutine must not report that newer attempt as gone.
+func TestController_ReportDisconnected_IgnoresStaleAttempt(t *testing.T) {
+	ctrl := NewController("/usr/bin/openfortivpn")
+
+	var mu sync.Mutex
+	var transitions []string
+	ctrl.OnStateChange(func(_, newState ConnectionState) {
+		mu.Lock()
+		defer mu.Unlock()
+		transitions = append(transitions, string(newState))
+	})
+
+	stale, err := ctrl.beginAttempt()
+	require.NoError(t, err)
+	require.NoError(t, ctrl.setState(StateFailed))
+
+	current, err := ctrl.beginAttempt()
+	require.NoError(t, err)
+	require.NotEqual(t, stale, current)
+
+	ctrl.reportDisconnected(stale)
+
+	assert.Equal(t, StateConnecting, ctrl.GetState(),
+		"a stale attempt must not report the current one as disconnected")
+
+	// The attempt that does own the controller still gets its terminal state.
+	ctrl.reportDisconnected(current)
+	assert.Equal(t, StateDisconnected, ctrl.GetState())
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"connecting", "failed", "connecting", "disconnected"}, transitions,
+		"the stale call must emit no state change at all")
+}
+
+// TestController_ProcessOutput_IgnoresSupersededAttempt covers the tail of a
+// failed attempt's output: its scanner is still draining buffered lines while
+// the retry it triggered is already connecting. Those lines belong in the log,
+// but acting on them would drive the retry's state and credentials.
+func TestController_ProcessOutput_IgnoresSupersededAttempt(t *testing.T) {
+	ctrl := NewController("/usr/bin/openfortivpn")
+
+	var mu sync.Mutex
+	var outputs, events, errs, states []string
+	ctrl.OnOutput(func(line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		outputs = append(outputs, line)
+	})
+	ctrl.OnEvent(func(event *OutputEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, string(event.Type))
+	})
+	ctrl.OnError(func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		errs = append(errs, err.Error())
+	})
+	ctrl.OnStateChange(func(_, newState ConnectionState) {
+		mu.Lock()
+		defer mu.Unlock()
+		states = append(states, string(newState))
+	})
+
+	stale, err := ctrl.beginAttempt()
+	require.NoError(t, err)
+	require.NoError(t, ctrl.setState(StateFailed))
+
+	// The retry the failure allowed.
+	_, err = ctrl.beginAttempt()
+	require.NoError(t, err)
+
+	// The dead process's buffered tail: each of these would otherwise move the
+	// retry's state, and the credential error would discard its password.
+	ctrl.processOutput(stale, "Tunnel is up and running.")
+	ctrl.processOutput(stale, "Got addresses: [10.0.0.50], ns [10.0.0.1]")
+	ctrl.processOutput(stale, "ERROR:  Could not authenticate to gateway. Please check the password, client certificate, etc.")
+	ctrl.processOutput(stale, "Closed connection to gateway.")
+
+	assert.Equal(t, StateConnecting, ctrl.GetState(), "the retry must keep its own state")
+	assert.Empty(t, ctrl.GetAssignedIP(), "a dead attempt must not claim the retry's addressing")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, outputs, 4, "the lines still belong in the connection log")
+	assert.Empty(t, events, "no event from a superseded attempt")
+	assert.Empty(t, errs, "no error dialog, and no password discarded, for a dead attempt")
+	assert.Equal(t, []string{"connecting", "failed", "connecting"}, states)
+}
+
+// TestController_BeginAttempt_WaitsForInFlightDispatch pins the boundary between
+// one attempt's callbacks and the next attempt's existence: a callback already
+// running when the user retries must finish before the retry is stamped, or it
+// would be acting on behalf of a connection that no longer exists.
+func TestController_BeginAttempt_WaitsForInFlightDispatch(t *testing.T) {
+	ctrl := NewController("/usr/bin/openfortivpn")
+
+	var mu sync.Mutex
+	var sequence []string
+	record := func(step string) {
+		mu.Lock()
+		defer mu.Unlock()
+		sequence = append(sequence, step)
+	}
+
+	// Consumers tell one connection's callbacks from the next by counting the
+	// Connecting announcements, so an in-flight dispatch must not see a newer
+	// one arrive — that is what would let it pass for the retry later.
+	var announced, observed int
+	ctrl.OnStateChange(func(_, newState ConnectionState) {
+		if newState == StateConnecting {
+			mu.Lock()
+			announced++
+			mu.Unlock()
+		}
+	})
+
+	dispatching := make(chan struct{})
+	ctrl.OnEvent(func(*OutputEvent) {
+		record("dispatch:start")
+		close(dispatching)
+		// Stand in for a callback the retry could race: a keyring delete, a
+		// browser launch, or a socket write to the GUI.
+		time.Sleep(100 * time.Millisecond)
+		mu.Lock()
+		observed = announced
+		mu.Unlock()
+		record("dispatch:end")
+	})
+
+	attempt, err := ctrl.beginAttempt()
+	require.NoError(t, err)
+
+	go ctrl.processOutput(attempt, "Got addresses: [10.0.0.50], ns [10.0.0.1]")
+
+	<-dispatching
+	require.NoError(t, ctrl.setState(StateFailed))
+
+	_, err = ctrl.beginAttempt()
+	require.NoError(t, err)
+	record("retry:begun")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"dispatch:start", "dispatch:end", "retry:begun"}, sequence,
+		"a retry must not be stamped while the previous attempt is still dispatching")
+	assert.Equal(t, 1, observed,
+		"an in-flight callback must not see the retry announced, or it would pass for it")
+	assert.Equal(t, 2, announced)
 }

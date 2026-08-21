@@ -3,8 +3,10 @@ package vpn
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -135,4 +137,43 @@ func createProcessState(exitCode int) *os.ProcessState {
 	cmd := exec.Command("sh", "-c", "exit "+strconv.Itoa(exitCode))
 	_ = cmd.Run()
 	return cmd.ProcessState
+}
+
+// TestCmdWithPipes_OutputSurvivesWait pins the pipe ownership the completion
+// path depends on: exec.Cmd must not close the output read ends when Wait sees
+// the process exit, so output buffered at exit is still readable afterwards.
+func TestCmdWithPipes_OutputSurvivesWait(t *testing.T) {
+	proc, err := NewDirectExecutor().CreateProcess(context.Background(), "sh", "-c",
+		`echo "last stdout line"; echo "last stderr line" >&2`)
+	require.NoError(t, err)
+	require.NoError(t, proc.Start())
+	require.NoError(t, proc.Wait())
+
+	stdout, err := io.ReadAll(proc.Stdout())
+	require.NoError(t, err, "stdout must still be readable after Wait")
+	assert.Equal(t, "last stdout line\n", string(stdout))
+
+	stderr, err := io.ReadAll(proc.Stderr())
+	require.NoError(t, err, "stderr must still be readable after Wait")
+	assert.Equal(t, "last stderr line\n", string(stderr))
+
+	require.NoError(t, proc.Stdout().Close())
+	require.NoError(t, proc.Stderr().Close())
+}
+
+// TestCmdWithPipes_StartFailureClosesPipes verifies that a failed start releases
+// the output pipes. Their read ends belong to cmdWithPipes rather than exec.Cmd,
+// so nothing else would ever close them: the helper daemon would leak two
+// descriptors per rejected connect request.
+func TestCmdWithPipes_StartFailureClosesPipes(t *testing.T) {
+	proc, err := NewDirectExecutor().CreateProcess(context.Background(),
+		filepath.Join(t.TempDir(), "no-such-openfortivpn"))
+	require.NoError(t, err)
+	require.Error(t, proc.Start())
+
+	_, err = proc.Stdout().Read(make([]byte, 1))
+	assert.ErrorIs(t, err, os.ErrClosed, "stdout read end must be closed")
+
+	_, err = proc.Stderr().Read(make([]byte, 1))
+	assert.ErrorIs(t, err, os.ErrClosed, "stderr read end must be closed")
 }

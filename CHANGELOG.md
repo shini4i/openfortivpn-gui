@@ -58,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preference changes are saved as soon as they are toggled. They were only
   written when the preferences window was closed, so quitting from the tray
   with it still open discarded the change.
+- The line explaining why a connection failed now reaches the connection log
+  and the error dialog. openfortivpn's last output was read from a pipe that
+  was closed the moment the process was reaped, so the decisive error could be
+  lost and a failure could be reported as a plain disconnect. The error also
+  now always arrives before the connection's final state, which is what lets a
+  gateway-rejected password be discarded from the keyring.
 
 ## [0.3.6] - 2026-07-27
 

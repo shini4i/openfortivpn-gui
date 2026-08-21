@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -22,16 +23,37 @@ type ConnectOptions struct {
 	OTP string
 }
 
+// defaultOutputDrainTimeout bounds the wait for the output scanners once the
+// process has exited. A grandchild that inherited the pipes keeps them open
+// after the process itself is gone; the bound stops that from wedging the state
+// machine.
+const defaultOutputDrainTimeout = 5 * time.Second
+
 // Controller manages VPN connection lifecycle using openfortivpn.
 type Controller struct {
 	openfortivpnPath string
 	executor         ProcessExecutor
 	directMode       bool // When true, run openfortivpn directly without pkexec
 
+	// Read without mu from the completion goroutine, so it must never be
+	// written after the controller's first Connect. Tests shorten it before.
+	outputDrainTimeout time.Duration
+
+	// Held for reading while an attempt dispatches callbacks, and for writing
+	// while a new attempt starts, so a superseded attempt can never deliver a
+	// callback to a newer connection. Always taken before mu, and never held by
+	// a callback that calls Connect — that would deadlock against beginAttempt.
+	dispatch sync.RWMutex
+
 	mu            sync.RWMutex
 	state         ConnectionState
 	assignedIP    string
 	interfaceName string
+
+	// Identifies the current connection attempt. Stamped when the state moves
+	// to Connecting, so a completion goroutine can tell whether the controller
+	// has moved on without depending on when its process was registered.
+	attempt uint64
 
 	// Process management
 	process Process
@@ -70,9 +92,10 @@ func WithDirectMode() ControllerOption {
 // Use WithExecutor or WithDirectMode options to customize behavior.
 func NewController(openfortivpnPath string, opts ...ControllerOption) *Controller {
 	c := &Controller{
-		openfortivpnPath: openfortivpnPath,
-		executor:         NewRealExecutor(),
-		state:            StateDisconnected,
+		openfortivpnPath:   openfortivpnPath,
+		executor:           NewRealExecutor(),
+		state:              StateDisconnected,
+		outputDrainTimeout: defaultOutputDrainTimeout,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -90,10 +113,23 @@ func (c *Controller) GetState() ConnectionState {
 // setState transitions to a new state if the transition is valid.
 // The state change callback is invoked outside the lock to prevent deadlocks.
 func (c *Controller) setState(newState ConnectionState) error {
+	return c.transition(newState, nil)
+}
+
+// transition applies newState when the state machine allows it and allowed
+// accepts the current state. allowed runs with the lock held and must not lock;
+// nil accepts any state. Rejection by allowed is not an error.
+func (c *Controller) transition(newState ConnectionState, allowed func(current ConnectionState) bool) error {
 	c.mu.Lock()
-	if !IsValidTransition(c.state, newState) {
+	if allowed != nil && !allowed(c.state) {
 		c.mu.Unlock()
-		return fmt.Errorf("invalid state transition from %s to %s", c.state, newState)
+		return nil
+	}
+
+	if !IsValidTransition(c.state, newState) {
+		oldState := c.state
+		c.mu.Unlock()
+		return fmt.Errorf("invalid state transition from %s to %s", oldState, newState)
 	}
 
 	oldState := c.state
@@ -107,6 +143,39 @@ func (c *Controller) setState(newState ConnectionState) error {
 	}
 
 	return nil
+}
+
+// beginAttempt transitions to Connecting and stamps the new attempt in the same
+// critical section, so no completion goroutine can mistake the attempt starting
+// here for its own. It first waits for any in-flight dispatch of the previous
+// attempt to finish. Returns the attempt's identifier.
+func (c *Controller) beginAttempt() (uint64, error) {
+	c.dispatch.Lock()
+	defer c.dispatch.Unlock()
+
+	c.mu.Lock()
+	if !IsValidTransition(c.state, StateConnecting) {
+		oldState := c.state
+		c.mu.Unlock()
+		return 0, fmt.Errorf("invalid state transition from %s to %s", oldState, StateConnecting)
+	}
+
+	oldState := c.state
+	c.state = StateConnecting
+	c.attempt++
+	attempt := c.attempt
+	callback := c.onStateChange
+	c.mu.Unlock()
+
+	// Called outside mu to prevent deadlocks, but still under dispatch: a
+	// consumer may use this announcement to tell one connection's callbacks
+	// from the next one's, which only holds while the previous attempt's
+	// dispatch is held off.
+	if callback != nil {
+		callback(oldState, StateConnecting)
+	}
+
+	return attempt, nil
 }
 
 // OnStateChange registers a callback for state changes.
@@ -147,6 +216,13 @@ func (c *Controller) CanDisconnect() bool {
 	return c.GetState().CanDisconnect()
 }
 
+// isCurrentAttempt reports whether attempt is the one the controller is on.
+func (c *Controller) isCurrentAttempt(attempt uint64) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.attempt == attempt
+}
+
 // GetAssignedIP returns the IP address assigned by the VPN.
 func (c *Controller) GetAssignedIP() string {
 	c.mu.RLock()
@@ -161,6 +237,20 @@ func (c *Controller) setAssignedIP(ip string) {
 	c.assignedIP = ip
 }
 
+// setAddressingForAttempt records the tunnel's address and interface, ignoring
+// an attempt the controller has already moved past so its output cannot
+// overwrite a newer connection's addressing. Reports whether it applied.
+func (c *Controller) setAddressingForAttempt(attempt uint64, ip, iface string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.attempt != attempt {
+		return false
+	}
+	c.assignedIP = ip
+	c.interfaceName = iface
+	return true
+}
+
 // GetInterface returns the network interface name used by the VPN tunnel.
 func (c *Controller) GetInterface() string {
 	c.mu.RLock()
@@ -168,17 +258,10 @@ func (c *Controller) GetInterface() string {
 	return c.interfaceName
 }
 
-// setInterface sets the interface name.
-func (c *Controller) setInterface(name string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.interfaceName = name
-}
-
 // detectInterface attempts to detect the VPN interface by the assigned IP.
-// It uses DetectInterfaceWithRetry for retry logic, then verifies the connection
-// state is still valid before setting the interface name.
-func (c *Controller) detectInterface(assignedIP string) {
+// It uses DetectInterfaceWithRetry for retry logic, then verifies the attempt is
+// still current and the connection state still valid before setting the name.
+func (c *Controller) detectInterface(attempt uint64, assignedIP string) {
 	ifaceName, err := DetectInterfaceWithRetry(assignedIP, 5, 100*time.Millisecond, nil)
 	if err != nil {
 		slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP)
@@ -189,7 +272,7 @@ func (c *Controller) detectInterface(assignedIP string) {
 	c.mu.Lock()
 	currentIP := c.assignedIP
 	currentState := c.state
-	if currentIP == assignedIP && currentState != StateDisconnected {
+	if c.attempt == attempt && currentIP == assignedIP && currentState != StateDisconnected {
 		c.interfaceName = ifaceName
 		c.mu.Unlock()
 		slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
@@ -233,8 +316,11 @@ func (c *Controller) emitError(err error) {
 	}
 }
 
-// processOutput processes a single line of openfortivpn output.
-func (c *Controller) processOutput(line string) {
+// processOutput processes a single line of openfortivpn output on behalf of the
+// given attempt. A superseded attempt's line still reaches the connection log,
+// but nothing acts on it: its events would drive a newer connection's state,
+// dialogs and stored credentials on behalf of a process that is already gone.
+func (c *Controller) processOutput(attempt uint64, line string) {
 	// Emit raw output
 	c.emitOutput(line)
 
@@ -244,50 +330,65 @@ func (c *Controller) processOutput(line string) {
 		return
 	}
 
+	// Held across the dispatch: a retry starting midway through would otherwise
+	// receive this attempt's callbacks.
+	c.dispatch.RLock()
+	defer c.dispatch.RUnlock()
+
+	if !c.isCurrentAttempt(attempt) {
+		slog.Debug("Ignoring event from a superseded connection attempt",
+			"event", event.Type, "attempt", attempt)
+		return
+	}
+
 	// Emit parsed event
 	c.emitEvent(event)
+
+	// Runs under the state lock, so it reads c.attempt without taking it.
+	isCurrent := func(ConnectionState) bool { return c.attempt == attempt }
 
 	// Handle state transitions based on event type
 	switch event.Type {
 	case EventConnected:
-		if err := c.setState(StateConnected); err != nil {
+		if err := c.transition(StateConnected, isCurrent); err != nil {
 			c.emitError(fmt.Errorf("state transition failed: %w", err))
 		}
 
 	case EventDisconnected:
-		c.setAssignedIP("")
-		c.setInterface("")
-		if err := c.setState(StateDisconnected); err != nil {
+		c.setAddressingForAttempt(attempt, "", "")
+		if err := c.transition(StateDisconnected, isCurrent); err != nil {
 			c.emitError(fmt.Errorf("state transition failed: %w", err))
 		}
 
 	case EventGotIP:
 		if ip := event.GetData("ip"); ip != "" {
-			c.setAssignedIP(ip)
+			if !c.setAddressingForAttempt(attempt, ip, "") {
+				return
+			}
 			// Detect the interface in background since it may take a moment to appear.
 			// Verify state under lock before spawning to avoid unnecessary goroutines.
 			c.mu.RLock()
 			shouldDetect := c.assignedIP == ip && c.state != StateDisconnected
 			c.mu.RUnlock()
 			if shouldDetect {
-				go c.detectInterface(ip)
+				go c.detectInterface(attempt, ip)
 			}
 		}
 
 	case EventError:
 		c.emitError(errors.New(event.Message))
-		// Only transition to Failed if we're still in a connecting state.
-		// If the process has already exited and transitioned to Disconnected,
-		// there's no point in transitioning to Failed.
-		currentState := c.GetState()
-		if currentState.IsTransitioning() {
-			if err := c.setState(StateFailed); err != nil {
-				c.emitError(fmt.Errorf("state transition failed: %w", err))
-			}
+		// Only transition to Failed if this attempt is still in a connecting
+		// state. If its process has already exited and transitioned to
+		// Disconnected, there's no point in transitioning to Failed.
+		transitioning := func(current ConnectionState) bool {
+			return isCurrent(current) && current.IsTransitioning()
+		}
+		if err := c.transition(StateFailed, transitioning); err != nil {
+			c.emitError(fmt.Errorf("state transition failed: %w", err))
 		}
 
 	case EventAuthenticate:
-		if err := c.setState(StateAuthenticating); err != nil {
+		if err := c.transition(StateAuthenticating, isCurrent); err != nil {
 			c.emitError(fmt.Errorf("state transition failed: %w", err))
 		}
 	}
@@ -380,7 +481,8 @@ func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *Conn
 	}
 
 	// Transition to connecting state
-	if err := c.setState(StateConnecting); err != nil {
+	attempt, err := c.beginAttempt()
+	if err != nil {
 		return fmt.Errorf("failed to set connecting state: %w", err)
 	}
 
@@ -390,7 +492,7 @@ func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *Conn
 	}
 
 	// Start the VPN process
-	process, err := c.startProcess(ctx, p, opts)
+	process, cancel, err := c.startProcess(ctx, p, opts)
 	if err != nil {
 		return err
 	}
@@ -399,19 +501,19 @@ func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *Conn
 	c.setupCredentialInput(p, opts)
 
 	// Set up stdout/stderr processing
-	c.setupOutputProcessing(process)
+	outputDone := c.setupOutputProcessing(attempt, process)
 
 	// Handle process completion in background
-	c.handleProcessCompletion(process)
+	c.handleProcessCompletion(attempt, process, outputDone, cancel)
 
 	return nil
 }
 
-// startProcess creates and starts the openfortivpn process.
-// In normal mode, it uses pkexec for privilege escalation.
-// In direct mode (helper daemon), it runs openfortivpn directly.
-// Returns the started process or an error. On error, the state is set to Failed.
-func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts *ConnectOptions) (Process, error) {
+// startProcess creates and starts the openfortivpn process: via pkexec normally,
+// directly in direct mode (the helper daemon). Returns the process and the cancel
+// func of the context driving it; on error the context is released and the state
+// is set to Failed.
+func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts *ConnectOptions) (Process, context.CancelFunc, error) {
 	// Create cancellable context. Stored under lock: other goroutines
 	// (setupOutputProcessing, handleProcessCompletion) read these fields
 	// under the same mutex.
@@ -440,10 +542,11 @@ func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts 
 		c.ctx = nil
 		c.cancel = nil
 		c.mu.Unlock()
+		cancel()
 		if stateErr := c.setState(StateFailed); stateErr != nil {
 			slog.Warn("Failed to set failed state", "error", stateErr)
 		}
-		return nil, fmt.Errorf("failed to create process: %w", err)
+		return nil, nil, fmt.Errorf("failed to create process: %w", err)
 	}
 
 	c.mu.Lock()
@@ -459,13 +562,14 @@ func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts 
 		c.ctx = nil
 		c.cancel = nil
 		c.mu.Unlock()
+		cancel()
 		if stateErr := c.setState(StateFailed); stateErr != nil {
 			slog.Warn("Failed to set failed state", "error", stateErr)
 		}
-		return nil, fmt.Errorf("failed to start openfortivpn: %w", err)
+		return nil, nil, fmt.Errorf("failed to start openfortivpn: %w", err)
 	}
 
-	return process, nil
+	return process, cancel, nil
 }
 
 // setupCredentialInput writes the password and OTP to stdin, each on its own
@@ -519,16 +623,27 @@ const (
 	outputScannerMaxLineSize = 1024 * 1024
 )
 
-// setupOutputProcessing starts goroutines to process stdout and stderr.
-// The goroutines respect context cancellation and will stop processing
-// when the context is cancelled.
-func (c *Controller) setupOutputProcessing(process Process) {
+// setupOutputProcessing starts goroutines to process stdout and stderr. The
+// goroutines stop when the context is cancelled. The returned WaitGroup
+// completes once both have finished reading, so callers can order work after
+// the output.
+func (c *Controller) setupOutputProcessing(attempt uint64, process Process) *sync.WaitGroup {
 	c.mu.RLock()
 	ctx := c.ctx
 	c.mu.RUnlock()
 
-	go c.scanOutput(ctx, "stdout", process.Stdout())
-	go c.scanOutput(ctx, "stderr", process.Stderr())
+	var outputDone sync.WaitGroup
+	outputDone.Add(2)
+	go func() {
+		defer outputDone.Done()
+		c.scanOutput(ctx, attempt, "stdout", process.Stdout())
+	}()
+	go func() {
+		defer outputDone.Done()
+		c.scanOutput(ctx, attempt, "stderr", process.Stderr())
+	}()
+
+	return &outputDone
 }
 
 // scanOutput reads one output stream line by line until EOF or context
@@ -536,7 +651,7 @@ func (c *Controller) setupOutputProcessing(process Process) {
 // surfaced via emitError unless the context was cancelled (intentional
 // shutdown); an ErrTooLong is reported explicitly since it means output was
 // dropped despite the enlarged buffer.
-func (c *Controller) scanOutput(ctx context.Context, streamName string, r io.Reader) {
+func (c *Controller) scanOutput(ctx context.Context, attempt uint64, streamName string, r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, outputScannerInitialSize), outputScannerMaxLineSize)
 
@@ -547,13 +662,13 @@ func (c *Controller) scanOutput(ctx context.Context, streamName string, r io.Rea
 			return
 		default:
 		}
-		c.processOutput(scanner.Text())
+		c.processOutput(attempt, scanner.Text())
 	}
 
 	// Scanner errors when pipe closes are expected during normal process exit
 	// Don't emit errors if context was cancelled (intentional shutdown)
 	err := scanner.Err()
-	if err == nil || errors.Is(err, io.ErrClosedPipe) {
+	if err == nil || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed) {
 		return
 	}
 	select {
@@ -568,35 +683,87 @@ func (c *Controller) scanOutput(ctx context.Context, streamName string, r io.Rea
 	c.emitError(fmt.Errorf("%s scanner error: %w", streamName, err))
 }
 
-// handleProcessCompletion waits for the process to exit and cleans up resources.
-// It always transitions to disconnected state when the process exits, regardless
-// of whether the context was cancelled (intentional disconnect) or the process
-// exited on its own.
-func (c *Controller) handleProcessCompletion(process Process) {
+// waitForOutputDrain blocks until the output scanners have finished reading, or
+// until the drain timeout elapses.
+func waitForOutputDrain(outputDone *sync.WaitGroup, timeout time.Duration) {
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		outputDone.Wait()
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(timeout):
+		slog.Warn("Timed out waiting for openfortivpn output to drain; final output lines may be missing")
+	}
+}
+
+// handleProcessCompletion waits for the process to exit however it was
+// terminated, lets the output scanners finish, cleans up resources, and then
+// transitions to disconnected. Draining before the state change is what keeps
+// the final error line ahead of the terminal state the UI reacts to.
+func (c *Controller) handleProcessCompletion(attempt uint64, process Process, outputDone *sync.WaitGroup, cancel context.CancelFunc) {
 	go func() {
 		// Wait error is intentionally ignored - we're cleaning up regardless
 		_ = process.Wait()
 
+		// The pipes outlive Wait (see newCmdWithPipes), so the scanners reach
+		// the last line on their own; closing afterwards releases them even if
+		// something else still holds the write ends.
+		waitForOutputDrain(outputDone, c.outputDrainTimeout)
+		_ = process.Stdout().Close()
+		_ = process.Stderr().Close()
+
+		// Release this connection's context. The process is already reaped, so
+		// the context-driven kill is a no-op; what this stops is a scanner that
+		// outlived the drain feeding stale lines to a newer connection.
+		cancel()
+
+		// A failure state re-enables Connect, so a newer attempt may already own
+		// the controller. Touch nothing in that case: reporting a terminal state
+		// would leave the live connection unstoppable from the UI. The attempt
+		// is the test, not c.process — a retry claims it before it has a process.
 		c.mu.Lock()
-		c.process = nil
-		c.ctx = nil
-		c.cancel = nil
-		if c.stdin != nil {
-			if err := c.stdin.Close(); err != nil {
-				slog.Warn("Failed to close stdin pipe", "error", err)
+		owned := c.attempt == attempt
+		if owned {
+			c.process = nil
+			c.ctx = nil
+			c.cancel = nil
+			if c.stdin != nil {
+				if err := c.stdin.Close(); err != nil {
+					slog.Warn("Failed to close stdin pipe", "error", err)
+				}
 			}
+			c.stdin = nil
 		}
-		c.stdin = nil
-		currentState := c.state
 		c.mu.Unlock()
 
-		// Transition to disconnected if we're still in a connected/connecting state
-		if currentState == StateConnected || currentState == StateConnecting || currentState == StateAuthenticating {
-			if err := c.setState(StateDisconnected); err != nil {
-				slog.Warn("Failed to transition to disconnected state", "error", err)
-			}
+		if !owned {
+			slog.Debug("Skipping completion cleanup: a newer connection owns the controller")
+			return
 		}
+
+		c.reportDisconnected(attempt)
 	}()
+}
+
+// reportDisconnected moves a still-live connection to Disconnected. The attempt
+// check shares the lock with the transition, because a scanner outliving the
+// drain can fail this attempt — freeing the UI to start the next one — in the
+// gap between the two.
+func (c *Controller) reportDisconnected(attempt uint64) {
+	c.dispatch.RLock()
+	defer c.dispatch.RUnlock()
+
+	live := func(current ConnectionState) bool {
+		return c.attempt == attempt &&
+			(current == StateConnected || current == StateConnecting || current == StateAuthenticating)
+	}
+
+	if err := c.transition(StateDisconnected, live); err != nil {
+		slog.Warn("Failed to transition to disconnected state", "error", err)
+	}
 }
 
 // Disconnect terminates the active VPN connection.

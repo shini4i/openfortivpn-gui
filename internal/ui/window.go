@@ -66,6 +66,12 @@ type MainWindow struct {
 	// credentials, since error events carry no profile of their own.
 	connectingProfile *profile.Profile
 
+	// connection counts the connections started from this window. Callbacks
+	// arrive on a background goroutine and run later on the main thread, so
+	// they carry the count they were raised under and are dropped if a newer
+	// connection has begun in between.
+	connection connectionCounter
+
 	// Callbacks
 	onProfileConnecting func(profileID string)
 
@@ -73,6 +79,11 @@ type MainWindow struct {
 	// to glib.IdleAdd and is injectable so tests can run handlers synchronously
 	// without a running GTK main loop.
 	scheduleOnMain func(func())
+
+	// presentError shows an error dialog. It defaults to showError and is
+	// injectable so tests can drive handlers that report failures without
+	// constructing GTK widgets.
+	presentError func(title, message string)
 }
 
 // NewMainWindow creates a new main window instance.
@@ -81,6 +92,7 @@ func NewMainWindow(app *adw.Application, deps *MainWindowDeps) *MainWindow {
 		deps:           deps,
 		scheduleOnMain: func(fn func()) { glib.IdleAdd(fn) },
 	}
+	w.presentError = w.showError
 
 	w.setupWindow(app)
 	w.setupLayout()
@@ -294,7 +306,16 @@ func (w *MainWindow) setupCallbacks() {
 // state and crashes the process with a SIGSEGV. All work is therefore marshaled
 // onto the main thread via scheduleOnMain.
 func (w *MainWindow) handleStateChange(oldState, newState vpn.ConnectionState) {
+	w.countConnection(newState)
+
+	connection := w.connection.current()
 	w.scheduleOnMain(func() {
+		if !w.connection.isCurrent(connection) {
+			slog.Debug("Dropping state change from a superseded connection",
+				"from", oldState, "to", newState)
+			return
+		}
+
 		w.releaseConnectingProfile(newState)
 
 		// Reset reconnect state on successful connection
@@ -365,16 +386,31 @@ func (w *MainWindow) handleStateChange(oldState, newState vpn.ConnectionState) {
 // showError constructs and presents a GTK dialog, which is not thread-safe, so
 // the work is marshaled onto the main thread via scheduleOnMain.
 func (w *MainWindow) handleError(err error) {
+	connection := w.connection.current()
 	w.scheduleOnMain(func() {
+		if !w.connection.isCurrent(connection) {
+			slog.Debug("Dropping error from a superseded connection", "error", err)
+			return
+		}
 		w.discardRejectedPassword(err)
-		w.showError("VPN Error", err.Error())
+		w.presentError("VPN Error", err.Error())
 	})
+}
+
+// countConnection records a newly announced connection. Counting it here rather
+// than at the connect call is deliberate: the controller announces Connecting
+// while it holds off the previous attempt's callbacks, so a callback still in
+// flight cannot read this connection's count and pass for it later.
+func (w *MainWindow) countConnection(newState vpn.ConnectionState) {
+	if newState == vpn.StateConnecting {
+		w.connection.begin()
+	}
 }
 
 // releaseConnectingProfile forgets the in-flight profile once its attempt has
 // finished, so a late credential error cannot discard the stored password of
-// whichever profile is connecting by then. A terminal state that overtakes the
-// error it belongs to therefore skips the discard (see issue #27).
+// whichever profile is connecting by then. The controller emits a failure's
+// error before the terminal state, so the discard still gets its chance.
 func (w *MainWindow) releaseConnectingProfile(newState vpn.ConnectionState) {
 	if newState == vpn.StateDisconnected || newState == vpn.StateFailed {
 		w.connectingProfile = nil
@@ -417,7 +453,12 @@ func (w *MainWindow) discardRejectedPassword(err error) {
 // touch GTK (e.g. opening a browser or showing an error dialog for SAML
 // authentication), so the work is marshaled onto the main thread.
 func (w *MainWindow) handleEvent(event *vpn.OutputEvent) {
+	connection := w.connection.current()
 	w.scheduleOnMain(func() {
+		if !w.connection.isCurrent(connection) {
+			slog.Debug("Dropping event from a superseded connection", "event", event.Type)
+			return
+		}
 		switch event.Type {
 		case vpn.EventGotIP:
 			if ip := event.GetData("ip"); ip != "" {

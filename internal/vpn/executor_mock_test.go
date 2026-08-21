@@ -255,3 +255,10 @@ func (e *MockExecutor) GetLastArgs() []string {
 	defer e.mu.Unlock()
 	return e.lastArgs
 }
+
+// GetLastCtx returns the context of the last CreateProcess call.
+func (e *MockExecutor) GetLastCtx() context.Context {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastCtx
+}

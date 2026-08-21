@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -65,11 +66,28 @@ type cmdWithPipes struct {
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr io.ReadCloser
+
+	// Parent's copies of the write ends handed to the child.
+	childStdout *os.File
+	childStderr *os.File
 }
 
-// Start starts the process but does not wait for it to complete.
+// Start starts the process but does not wait for it to complete. It releases
+// the parent's copies of the child's write ends either way: the child holds its
+// own, and ours would keep the read ends from ever seeing EOF. A failed start
+// closes the read ends too, since nothing downstream will read them.
 func (p *cmdWithPipes) Start() error {
-	return p.cmd.Start()
+	err := p.cmd.Start()
+
+	_ = p.childStdout.Close()
+	_ = p.childStderr.Close()
+
+	if err != nil {
+		_ = p.stdout.Close()
+		_ = p.stderr.Close()
+	}
+
+	return err
 }
 
 // Wait waits for the process to exit and returns the error.
@@ -92,8 +110,10 @@ func (p *cmdWithPipes) Stderr() io.ReadCloser {
 	return p.stderr
 }
 
-// newCmdWithPipes creates a command with stdin/stdout/stderr pipes configured.
-// The process is started in its own process group to allow killing all child processes.
+// newCmdWithPipes creates a command with stdin/stdout/stderr pipes configured,
+// in its own process group so that killing it kills all its children. The output
+// pipes are created here rather than via cmd.StdoutPipe, whose read ends exec.Cmd
+// closes as soon as Wait sees the exit — discarding output not yet read.
 func newCmdWithPipes(ctx context.Context, name string, args ...string) (*cmdWithPipes, error) {
 	// #nosec G204 -- name is the operator-configured openfortivpn binary path, not runtime user input; args are validated profile fields and exec.CommandContext runs no shell, so there is no injection surface
 	cmd := exec.CommandContext(ctx, name, args...)
@@ -103,26 +123,42 @@ func newCmdWithPipes(ctx context.Context, name string, args ...string) (*cmdWith
 		Setpgid: true,
 	}
 
+	// The output pipes come first: an early return then owns nothing but plain
+	// pipe ends, whereas cmd.StdinPipe hands its child end to exec.Cmd, which
+	// only releases it inside Start.
+	stdoutRead, stdoutWrite, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+
+	stderrRead, stderrWrite, err := os.Pipe()
+	if err != nil {
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
+		return nil, err
+	}
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
+		_ = stderrRead.Close()
+		_ = stderrWrite.Close()
 		return nil, err
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
+	// Assigning *os.File hands the descriptor to the child directly: exec.Cmd
+	// neither copies it through a goroutine nor closes it on Wait.
+	cmd.Stdout = stdoutWrite
+	cmd.Stderr = stderrWrite
 
 	return &cmdWithPipes{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: stdout,
-		stderr: stderr,
+		cmd:         cmd,
+		stdin:       stdin,
+		stdout:      stdoutRead,
+		stderr:      stderrRead,
+		childStdout: stdoutWrite,
+		childStderr: stderrWrite,
 	}, nil
 }
 
