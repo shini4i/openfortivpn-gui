@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-21
+
 ### Added
 
 - A "Saved Password" row in the profile editor's Authentication section, with a
@@ -132,7 +134,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`NoNewPrivileges`, namespace/syscall/address-family restrictions,
   `MemoryDenyWriteExecute`, and related protections).
 
-[Unreleased]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/shini4i/openfortivpn-gui/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.6...v0.4.0
 [0.3.6]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/shini4i/openfortivpn-gui/compare/v0.3.3...v0.3.4
