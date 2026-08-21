@@ -452,3 +452,133 @@ func TestAuthMethod_NeedsPassword(t *testing.T) {
 		})
 	}
 }
+
+// TestValidate_TextFieldsRejectControlCharacters asserts every free-text field
+// that reaches openfortivpn's argument vector is screened, not just the ones
+// rendered in the profile list.
+func TestValidate_TextFieldsRejectControlCharacters(t *testing.T) {
+	tests := []struct {
+		field  string
+		mutate func(p *Profile)
+	}{
+		{"username", func(p *Profile) { p.Username = "user\x00name" }},
+		{"realm", func(p *Profile) { p.Realm = "corp\nrealm" }},
+		{"trusted certificate", func(p *Profile) { p.TrustedCert = "abc\x07def" }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			p := NewProfile("Valid")
+			p.Host = "vpn.example.com"
+			p.Username = "user"
+			tt.mutate(p)
+
+			err := p.Validate()
+
+			require.Error(t, err, "%s must be screened for control characters", tt.field)
+			assert.Contains(t, err.Error(), tt.field)
+		})
+	}
+}
+
+func TestValidate_TextFieldsRejectOverlongValues(t *testing.T) {
+	tests := []struct {
+		field  string
+		mutate func(p *Profile)
+	}{
+		{"username", func(p *Profile) { p.Username = strings.Repeat("u", maxUsernameLength+1) }},
+		{"realm", func(p *Profile) { p.Realm = strings.Repeat("r", maxRealmLength+1) }},
+		{"trusted certificate", func(p *Profile) {
+			p.TrustedCert = strings.Repeat("a", maxTrustedCertLength+1)
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			p := NewProfile("Valid")
+			p.Host = "vpn.example.com"
+			p.Username = "user"
+			tt.mutate(p)
+
+			err := p.Validate()
+
+			require.Error(t, err, "%s must be length-limited", tt.field)
+			assert.Contains(t, err.Error(), tt.field)
+		})
+	}
+}
+
+// colonSeparatedFingerprint returns a SHA-256 fingerprint in the colon-separated
+// form `openssl x509 -fingerprint` prints, which a user may paste verbatim.
+func colonSeparatedFingerprint() string {
+	pairs := make([]string, 32)
+	for i := range pairs {
+		pairs[i] = "AB"
+	}
+	return strings.Join(pairs, ":")
+}
+
+// TestValidate_AcceptsRealisticTextFields guards against the length caps being
+// tightened to values that reject ordinary profiles. The rejection tests are
+// written relative to the constants, so they stay green for any cap; these
+// concrete shapes are what actually pins the caps to something usable.
+func TestValidate_AcceptsRealisticTextFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(p *Profile)
+	}{
+		{"UPN username", func(p *Profile) { p.Username = "first.last@corp.example.com" }},
+		{"down-level AD username", func(p *Profile) { p.Username = `CORP\first.last` }},
+		{"long username in a deep domain", func(p *Profile) {
+			p.Username = strings.Repeat("a", 40) + "@" + strings.Repeat("sub.", 8) + "corp.example.com"
+		}},
+		{"hyphenated realm", func(p *Profile) { p.Realm = "corporate-users" }},
+		{"dotted realm", func(p *Profile) { p.Realm = "corp.remote-access" }},
+		{"sha256 digest", func(p *Profile) { p.TrustedCert = strings.Repeat("ab", 32) }},
+		{"colon-separated fingerprint", func(p *Profile) {
+			fp := colonSeparatedFingerprint()
+			require.Len(t, fp, 95, "openssl prints 32 hex pairs joined by colons")
+			p.TrustedCert = fp
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewProfile("Work VPN")
+			p.Host = "vpn.example.com"
+			p.Username = "user"
+			tt.mutate(p)
+
+			assert.NoError(t, p.Validate())
+		})
+	}
+}
+
+// TestValidate_AcceptsValuesAtLengthCap pins the boundary as inclusive, so
+// turning the length check into a >= comparison fails here instead of silently
+// rejecting values that were previously accepted.
+func TestValidate_AcceptsValuesAtLengthCap(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(p *Profile)
+	}{
+		{"name", func(p *Profile) { p.Name = strings.Repeat("a", maxNameLength) }},
+		{"description", func(p *Profile) { p.Description = strings.Repeat("a", maxDescriptionLength) }},
+		{"username", func(p *Profile) { p.Username = strings.Repeat("a", maxUsernameLength) }},
+		{"realm", func(p *Profile) { p.Realm = strings.Repeat("a", maxRealmLength) }},
+		{"trusted certificate", func(p *Profile) {
+			p.TrustedCert = strings.Repeat("a", maxTrustedCertLength)
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewProfile("Work VPN")
+			p.Host = "vpn.example.com"
+			p.Username = "user"
+			tt.mutate(p)
+
+			assert.NoError(t, p.Validate(), "a value of exactly the cap must be accepted")
+		})
+	}
+}

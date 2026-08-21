@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The username, realm and trusted-certificate fields are now checked for
+  control characters and a maximum length when connecting, matching the checks
+  already applied to the profile name, description and host. The limits are 256
+  characters for username and realm and 128 for a trusted certificate, so
+  ordinary values are unaffected.
+
 ### Fixed
 
 - On hosts with no `resolvconf` binary, the VPN's DNS servers are now applied
@@ -38,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saved and validated but never read, so a binary installed outside the
   expected location could not be selected. If the configured path cannot be
   found, the binary is looked up on `PATH` as before.
+- The address assigned by the VPN is no longer left on screen while the
+  connection is being re-established. It was only cleared on disconnect and
+  failure, so the previous tunnel's address stayed visible under
+  "Connecting…" and "Reconnecting…".
 
 ## [0.3.6] - 2026-07-27
 

@@ -78,6 +78,13 @@ func (sd *StatusDisplay) SetState(state vpn.ConnectionState) {
 	})
 }
 
+// assignedIPVisible reports whether the tunnel address should be shown. The
+// address describes a live tunnel, so every other state hides it rather than
+// leaving the previous connection's address on screen.
+func assignedIPVisible(state vpn.ConnectionState, assignedIP string) bool {
+	return state == vpn.StateConnected && assignedIP != ""
+}
+
 // updateStateDisplay updates the UI based on the current state.
 func (sd *StatusDisplay) updateStateDisplay() {
 	var stateText string
@@ -85,24 +92,25 @@ func (sd *StatusDisplay) updateStateDisplay() {
 	switch sd.state {
 	case vpn.StateDisconnected:
 		stateText = "Disconnected"
-		sd.ipLabel.SetVisible(false)
 	case vpn.StateConnecting:
 		stateText = "Connecting..."
 	case vpn.StateAuthenticating:
 		stateText = "Authenticating..."
 	case vpn.StateConnected:
 		stateText = "Connected"
-		if sd.assignedIP != "" {
-			sd.ipLabel.SetText(fmt.Sprintf("• %s", sd.assignedIP))
-			sd.ipLabel.SetVisible(true)
-		}
 	case vpn.StateReconnecting:
 		stateText = "Reconnecting..."
 	case vpn.StateFailed:
 		stateText = "Failed"
-		sd.ipLabel.SetVisible(false)
 	default:
 		stateText = string(sd.state)
+	}
+
+	if assignedIPVisible(sd.state, sd.assignedIP) {
+		sd.ipLabel.SetText(fmt.Sprintf("• %s", sd.assignedIP))
+		sd.ipLabel.SetVisible(true)
+	} else {
+		sd.ipLabel.SetVisible(false)
 	}
 
 	sd.stateLabel.SetLabel(stateText)
@@ -137,12 +145,7 @@ func (sd *StatusDisplay) SetProfileInfo(name string) {
 func (sd *StatusDisplay) SetAssignedIP(ip string) {
 	glib.IdleAdd(func() {
 		sd.assignedIP = ip
-		if ip != "" && sd.state == vpn.StateConnected {
-			sd.ipLabel.SetText(fmt.Sprintf("• %s", ip))
-			sd.ipLabel.SetVisible(true)
-		} else {
-			sd.ipLabel.SetVisible(false)
-		}
+		sd.updateStateDisplay()
 	})
 }
 

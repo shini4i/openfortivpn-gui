@@ -22,6 +22,14 @@ const (
 	// Maximum lengths for text fields to prevent UI issues.
 	maxNameLength        = 100
 	maxDescriptionLength = 500
+
+	// Limits for the fields handed to openfortivpn's argument vector, generous
+	// on purpose: the point is to screen control characters and absurd input,
+	// not to second-guess a gateway. --trusted-cert takes a SHA-256 digest (64
+	// hex chars); 128 is headroom for a pasted colon-separated fingerprint.
+	maxUsernameLength    = 256
+	maxRealmLength       = 256
+	maxTrustedCertLength = 128
 )
 
 // Profile represents a VPN connection configuration.
@@ -91,6 +99,19 @@ func (p *Profile) Validate() error {
 
 	if p.Port < 1 || p.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535, got %d", p.Port)
+	}
+
+	// Screened for the same reasons as the fields above: these three reach
+	// openfortivpn's argument vector, and the helper daemon relies on Validate
+	// as the gate for parameters supplied over its socket.
+	if err := validateTextInput(p.Username, "username", maxUsernameLength); err != nil {
+		return err
+	}
+	if err := validateTextInput(p.Realm, "realm", maxRealmLength); err != nil {
+		return err
+	}
+	if err := validateTextInput(p.TrustedCert, "trusted certificate", maxTrustedCertLength); err != nil {
+		return err
 	}
 
 	switch p.AuthMethod {
