@@ -181,7 +181,7 @@ func TestController_ProcessOutput(t *testing.T) {
 	})
 
 	// Process tunnel up message
-	ctrl.processOutput("Tunnel is up and running.")
+	ctrl.processOutput(ctrl.attempt, "Tunnel is up and running.")
 
 	mu.Lock()
 	require.Len(t, events, 1)
@@ -195,7 +195,7 @@ func TestController_ProcessOutput_GotIP(t *testing.T) {
 	ctrl := NewController("/usr/bin/openfortivpn")
 	_ = ctrl.setState(StateConnecting)
 
-	ctrl.processOutput("Got addresses: [10.0.0.50], ns [10.0.0.1]")
+	ctrl.processOutput(ctrl.attempt, "Got addresses: [10.0.0.50], ns [10.0.0.1]")
 
 	assert.Equal(t, "10.0.0.50", ctrl.GetAssignedIP())
 }
@@ -213,7 +213,7 @@ func TestController_ProcessOutput_Error(t *testing.T) {
 		lastError = err.Error()
 	})
 
-	ctrl.processOutput("ERROR:  VPN authentication failed.")
+	ctrl.processOutput(ctrl.attempt, "ERROR:  VPN authentication failed.")
 
 	mu.Lock()
 	assert.Contains(t, lastError, "VPN authentication failed")
@@ -591,7 +591,7 @@ func TestController_ProcessOutput_Authenticate(t *testing.T) {
 		events = append(events, event)
 	})
 
-	ctrl.processOutput("Authenticate at 'https://sso.example.com/auth?session=abc'")
+	ctrl.processOutput(ctrl.attempt, "Authenticate at 'https://sso.example.com/auth?session=abc'")
 
 	mu.Lock()
 	require.Len(t, events, 1)
@@ -691,7 +691,7 @@ func TestController_StateTransitionOnDisconnect(t *testing.T) {
 	})
 
 	// Process disconnect event
-	ctrl.processOutput("Tunnel is down.")
+	ctrl.processOutput(ctrl.attempt, "Tunnel is down.")
 
 	// Verify state transition (synchronous, no sleep needed)
 	mu.Lock()
@@ -1173,7 +1173,7 @@ func TestController_ProcessOutput_Error_EmitsErrorBeforeStateChange(t *testing.T
 		sequence = append(sequence, "state:"+string(newState))
 	})
 
-	ctrl.processOutput(
+	ctrl.processOutput(ctrl.attempt,
 		"ERROR:  Could not authenticate to gateway. Please check the password, client certificate, etc.")
 
 	mu.Lock()
@@ -1515,7 +1515,7 @@ func TestController_ScanOutput_ClosedPipeIsNotAnError(t *testing.T) {
 
 	// An uncancelled context: the suppression must come from the error itself,
 	// not from a shutdown that happens to be in progress.
-	ctrl.scanOutput(context.Background(), "stdout", reader)
+	ctrl.scanOutput(context.Background(), ctrl.attempt, "stdout", reader)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1662,4 +1662,60 @@ func TestController_ReportDisconnected_IgnoresStaleAttempt(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, []string{"connecting", "failed", "connecting", "disconnected"}, transitions,
 		"the stale call must emit no state change at all")
+}
+
+// TestController_ProcessOutput_IgnoresSupersededAttempt covers the tail of a
+// failed attempt's output: its scanner is still draining buffered lines while
+// the retry it triggered is already connecting. Those lines belong in the log,
+// but acting on them would drive the retry's state and credentials.
+func TestController_ProcessOutput_IgnoresSupersededAttempt(t *testing.T) {
+	ctrl := NewController("/usr/bin/openfortivpn")
+
+	var mu sync.Mutex
+	var outputs, events, errs, states []string
+	ctrl.OnOutput(func(line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		outputs = append(outputs, line)
+	})
+	ctrl.OnEvent(func(event *OutputEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, string(event.Type))
+	})
+	ctrl.OnError(func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		errs = append(errs, err.Error())
+	})
+	ctrl.OnStateChange(func(_, newState ConnectionState) {
+		mu.Lock()
+		defer mu.Unlock()
+		states = append(states, string(newState))
+	})
+
+	stale, err := ctrl.beginAttempt()
+	require.NoError(t, err)
+	require.NoError(t, ctrl.setState(StateFailed))
+
+	// The retry the failure allowed.
+	_, err = ctrl.beginAttempt()
+	require.NoError(t, err)
+
+	// The dead process's buffered tail: each of these would otherwise move the
+	// retry's state, and the credential error would discard its password.
+	ctrl.processOutput(stale, "Tunnel is up and running.")
+	ctrl.processOutput(stale, "Got addresses: [10.0.0.50], ns [10.0.0.1]")
+	ctrl.processOutput(stale, "ERROR:  Could not authenticate to gateway. Please check the password, client certificate, etc.")
+	ctrl.processOutput(stale, "Closed connection to gateway.")
+
+	assert.Equal(t, StateConnecting, ctrl.GetState(), "the retry must keep its own state")
+	assert.Empty(t, ctrl.GetAssignedIP(), "a dead attempt must not claim the retry's addressing")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, outputs, 4, "the lines still belong in the connection log")
+	assert.Empty(t, events, "no event from a superseded attempt")
+	assert.Empty(t, errs, "no error dialog, and no password discarded, for a dead attempt")
+	assert.Equal(t, []string{"connecting", "failed", "connecting"}, states)
 }
