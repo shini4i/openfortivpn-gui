@@ -44,6 +44,11 @@ type Controller struct {
 	assignedIP    string
 	interfaceName string
 
+	// Identifies the current connection attempt. Stamped when the state moves
+	// to Connecting, so a completion goroutine can tell whether the controller
+	// has moved on without depending on when its process was registered.
+	attempt uint64
+
 	// Process management
 	process Process
 	ctx     context.Context
@@ -119,6 +124,32 @@ func (c *Controller) setState(newState ConnectionState) error {
 	}
 
 	return nil
+}
+
+// beginAttempt transitions to Connecting and stamps the new attempt in the same
+// critical section, so no completion goroutine can mistake the attempt starting
+// here for its own. Returns the attempt's identifier.
+func (c *Controller) beginAttempt() (uint64, error) {
+	c.mu.Lock()
+	if !IsValidTransition(c.state, StateConnecting) {
+		oldState := c.state
+		c.mu.Unlock()
+		return 0, fmt.Errorf("invalid state transition from %s to %s", oldState, StateConnecting)
+	}
+
+	oldState := c.state
+	c.state = StateConnecting
+	c.attempt++
+	attempt := c.attempt
+	callback := c.onStateChange
+	c.mu.Unlock()
+
+	// Call callback outside of lock to prevent deadlocks
+	if callback != nil {
+		callback(oldState, StateConnecting)
+	}
+
+	return attempt, nil
 }
 
 // OnStateChange registers a callback for state changes.
@@ -392,7 +423,8 @@ func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *Conn
 	}
 
 	// Transition to connecting state
-	if err := c.setState(StateConnecting); err != nil {
+	attempt, err := c.beginAttempt()
+	if err != nil {
 		return fmt.Errorf("failed to set connecting state: %w", err)
 	}
 
@@ -414,7 +446,7 @@ func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *Conn
 	outputDone := c.setupOutputProcessing(process)
 
 	// Handle process completion in background
-	c.handleProcessCompletion(process, outputDone, cancel)
+	c.handleProcessCompletion(attempt, process, outputDone, cancel)
 
 	return nil
 }
@@ -613,7 +645,7 @@ func waitForOutputDrain(outputDone *sync.WaitGroup, timeout time.Duration) {
 // terminated, lets the output scanners finish, cleans up resources, and then
 // transitions to disconnected. Draining before the state change is what keeps
 // the final error line ahead of the terminal state the UI reacts to.
-func (c *Controller) handleProcessCompletion(process Process, outputDone *sync.WaitGroup, cancel context.CancelFunc) {
+func (c *Controller) handleProcessCompletion(attempt uint64, process Process, outputDone *sync.WaitGroup, cancel context.CancelFunc) {
 	go func() {
 		// Wait error is intentionally ignored - we're cleaning up regardless
 		_ = process.Wait()
@@ -630,11 +662,12 @@ func (c *Controller) handleProcessCompletion(process Process, outputDone *sync.W
 		// outlived the drain feeding stale lines to a newer connection.
 		cancel()
 
-		// A failure state re-enables Connect, so a newer process may already own
+		// A failure state re-enables Connect, so a newer attempt may already own
 		// the controller. Touch nothing in that case: reporting a terminal state
-		// would leave the live connection unstoppable from the UI.
+		// would leave the live connection unstoppable from the UI. The attempt
+		// is the test, not c.process — a retry claims it before it has a process.
 		c.mu.Lock()
-		owned := c.process == process
+		owned := c.attempt == attempt
 		if owned {
 			c.process = nil
 			c.ctx = nil

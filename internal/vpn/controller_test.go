@@ -1413,9 +1413,24 @@ func (p *fakeProcess) Stderr() io.ReadCloser { return p.stderr }
 type fakeExecutor struct {
 	mu        sync.Mutex
 	processes []Process
+
+	// beforeCreate runs at the start of each CreateProcess call, which is the
+	// window where the attempt owns the state but has no process registered.
+	beforeCreate func(call int)
+	calls        int
 }
 
 func (e *fakeExecutor) CreateProcess(context.Context, string, ...string) (Process, error) {
+	e.mu.Lock()
+	hook := e.beforeCreate
+	e.calls++
+	call := e.calls
+	e.mu.Unlock()
+
+	if hook != nil {
+		hook(call)
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if len(e.processes) == 0 {
@@ -1549,4 +1564,64 @@ func TestController_Disconnect_BoundedOutputDrain(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Empty(t, emittedErrors, "a requested disconnect is not a failure")
+}
+
+// TestController_ProcessCompletion_DoesNotClobberRetryBeforeItsProcessStarts
+// closes the narrow window a process-identity check leaves open: a retry owns
+// the state from the moment it reaches Connecting, but registers its process
+// only later. A stale completion goroutine waking in between must still stand
+// down, or the retry's live tunnel becomes unstoppable from the UI.
+func TestController_ProcessCompletion_DoesNotClobberRetryBeforeItsProcessStarts(t *testing.T) {
+	failed := newFakeProcess()
+	retried := newFakeProcess()
+	executor := &fakeExecutor{processes: []Process{failed, retried}}
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
+	ctrl.outputDrainTimeout = 50 * time.Millisecond
+
+	p := &profile.Profile{
+		ID:         "550e8400-e29b-41d4-a716-446655440000",
+		Name:       "Test VPN",
+		Host:       "vpn.example.com",
+		Port:       443,
+		Username:   "testuser",
+		AuthMethod: profile.AuthMethodPassword,
+		SetDNS:     true,
+		SetRoutes:  true,
+	}
+
+	// The retry parks inside CreateProcess — state already Connecting, no
+	// process registered — until the stale goroutine has had its say.
+	executor.beforeCreate = func(call int) {
+		if call != 2 {
+			return
+		}
+		failed.exit()
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if ctrl.GetState() != StateConnecting {
+				return // the stale goroutine reported a terminal state
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	require.NoError(t, ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "wrongpassword"}))
+
+	// The first attempt fails; its pipes stay open, so its completion goroutine
+	// is still alive when the retry starts.
+	failed.stderr.deliver("ERROR:  Could not authenticate to gateway. Please check the password, client certificate, etc.")
+	require.Eventually(t, func() bool {
+		return ctrl.GetState() == StateFailed
+	}, time.Second, 10*time.Millisecond)
+
+	require.NoError(t, ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "rightpassword"}))
+	t.Cleanup(retried.exit)
+
+	assert.Equal(t, StateConnecting, ctrl.GetState(),
+		"the retry must keep the state it claimed before its process was registered")
+
+	ctrl.mu.RLock()
+	defer ctrl.mu.RUnlock()
+	assert.Same(t, retried, ctrl.process, "the retry's process must stay registered")
+	assert.NotNil(t, ctrl.stdin, "the retry's stdin must stay open")
 }
