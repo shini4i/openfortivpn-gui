@@ -1625,3 +1625,41 @@ func TestController_ProcessCompletion_DoesNotClobberRetryBeforeItsProcessStarts(
 	assert.Same(t, retried, ctrl.process, "the retry's process must stay registered")
 	assert.NotNil(t, ctrl.stdin, "the retry's stdin must stay open")
 }
+
+// TestController_ReportDisconnected_IgnoresStaleAttempt covers the gap between a
+// completion goroutine's ownership check and its state change: a scanner that
+// outlived the drain can fail the old attempt, which frees the UI to start the
+// next one. The stale goroutine must not report that newer attempt as gone.
+func TestController_ReportDisconnected_IgnoresStaleAttempt(t *testing.T) {
+	ctrl := NewController("/usr/bin/openfortivpn")
+
+	var mu sync.Mutex
+	var transitions []string
+	ctrl.OnStateChange(func(_, newState ConnectionState) {
+		mu.Lock()
+		defer mu.Unlock()
+		transitions = append(transitions, string(newState))
+	})
+
+	stale, err := ctrl.beginAttempt()
+	require.NoError(t, err)
+	require.NoError(t, ctrl.setState(StateFailed))
+
+	current, err := ctrl.beginAttempt()
+	require.NoError(t, err)
+	require.NotEqual(t, stale, current)
+
+	ctrl.reportDisconnected(stale)
+
+	assert.Equal(t, StateConnecting, ctrl.GetState(),
+		"a stale attempt must not report the current one as disconnected")
+
+	// The attempt that does own the controller still gets its terminal state.
+	ctrl.reportDisconnected(current)
+	assert.Equal(t, StateDisconnected, ctrl.GetState())
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"connecting", "failed", "connecting", "disconnected"}, transitions,
+		"the stale call must emit no state change at all")
+}

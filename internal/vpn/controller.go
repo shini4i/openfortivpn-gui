@@ -679,7 +679,6 @@ func (c *Controller) handleProcessCompletion(attempt uint64, process Process, ou
 			}
 			c.stdin = nil
 		}
-		currentState := c.state
 		c.mu.Unlock()
 
 		if !owned {
@@ -687,13 +686,38 @@ func (c *Controller) handleProcessCompletion(attempt uint64, process Process, ou
 			return
 		}
 
-		// Transition to disconnected if we're still in a connected/connecting state
-		if currentState == StateConnected || currentState == StateConnecting || currentState == StateAuthenticating {
-			if err := c.setState(StateDisconnected); err != nil {
-				slog.Warn("Failed to transition to disconnected state", "error", err)
-			}
-		}
+		c.reportDisconnected(attempt)
 	}()
+}
+
+// reportDisconnected moves a still-live connection to Disconnected. The attempt
+// check shares the lock with the transition, because a scanner outliving the
+// drain can fail this attempt — freeing the UI to start the next one — in the
+// gap between the two.
+func (c *Controller) reportDisconnected(attempt uint64) {
+	c.mu.Lock()
+	live := c.state == StateConnected || c.state == StateConnecting || c.state == StateAuthenticating
+	if c.attempt != attempt || !live {
+		c.mu.Unlock()
+		return
+	}
+
+	if !IsValidTransition(c.state, StateDisconnected) {
+		oldState := c.state
+		c.mu.Unlock()
+		slog.Warn("Failed to transition to disconnected state", "from", oldState)
+		return
+	}
+
+	oldState := c.state
+	c.state = StateDisconnected
+	callback := c.onStateChange
+	c.mu.Unlock()
+
+	// Call callback outside of lock to prevent deadlocks
+	if callback != nil {
+		callback(oldState, StateDisconnected)
+	}
 }
 
 // Disconnect terminates the active VPN connection.
