@@ -373,8 +373,8 @@ func (w *MainWindow) handleError(err error) {
 
 // releaseConnectingProfile forgets the in-flight profile once its attempt has
 // finished, so a late credential error cannot discard the stored password of
-// whichever profile is connecting by then. A terminal state that overtakes the
-// error it belongs to therefore skips the discard (see issue #27).
+// whichever profile is connecting by then. The controller emits a failure's
+// error before the terminal state, so the discard still gets its chance.
 func (w *MainWindow) releaseConnectingProfile(newState vpn.ConnectionState) {
 	if newState == vpn.StateDisconnected || newState == vpn.StateFailed {
 		w.connectingProfile = nil

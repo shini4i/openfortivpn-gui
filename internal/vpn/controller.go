@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -22,11 +23,21 @@ type ConnectOptions struct {
 	OTP string
 }
 
+// defaultOutputDrainTimeout bounds the wait for the output scanners once the
+// process has exited. A grandchild that inherited the pipes keeps them open
+// after the process itself is gone; the bound stops that from wedging the state
+// machine.
+const defaultOutputDrainTimeout = 5 * time.Second
+
 // Controller manages VPN connection lifecycle using openfortivpn.
 type Controller struct {
 	openfortivpnPath string
 	executor         ProcessExecutor
 	directMode       bool // When true, run openfortivpn directly without pkexec
+
+	// Read without mu from the completion goroutine, so it must never be
+	// written after the controller's first Connect. Tests shorten it before.
+	outputDrainTimeout time.Duration
 
 	mu            sync.RWMutex
 	state         ConnectionState
@@ -70,9 +81,10 @@ func WithDirectMode() ControllerOption {
 // Use WithExecutor or WithDirectMode options to customize behavior.
 func NewController(openfortivpnPath string, opts ...ControllerOption) *Controller {
 	c := &Controller{
-		openfortivpnPath: openfortivpnPath,
-		executor:         NewRealExecutor(),
-		state:            StateDisconnected,
+		openfortivpnPath:   openfortivpnPath,
+		executor:           NewRealExecutor(),
+		state:              StateDisconnected,
+		outputDrainTimeout: defaultOutputDrainTimeout,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -390,7 +402,7 @@ func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *Conn
 	}
 
 	// Start the VPN process
-	process, err := c.startProcess(ctx, p, opts)
+	process, cancel, err := c.startProcess(ctx, p, opts)
 	if err != nil {
 		return err
 	}
@@ -399,19 +411,19 @@ func (c *Controller) Connect(ctx context.Context, p *profile.Profile, opts *Conn
 	c.setupCredentialInput(p, opts)
 
 	// Set up stdout/stderr processing
-	c.setupOutputProcessing(process)
+	outputDone := c.setupOutputProcessing(process)
 
 	// Handle process completion in background
-	c.handleProcessCompletion(process)
+	c.handleProcessCompletion(process, outputDone, cancel)
 
 	return nil
 }
 
-// startProcess creates and starts the openfortivpn process.
-// In normal mode, it uses pkexec for privilege escalation.
-// In direct mode (helper daemon), it runs openfortivpn directly.
-// Returns the started process or an error. On error, the state is set to Failed.
-func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts *ConnectOptions) (Process, error) {
+// startProcess creates and starts the openfortivpn process: via pkexec normally,
+// directly in direct mode (the helper daemon). Returns the process and the cancel
+// func of the context driving it; on error the context is released and the state
+// is set to Failed.
+func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts *ConnectOptions) (Process, context.CancelFunc, error) {
 	// Create cancellable context. Stored under lock: other goroutines
 	// (setupOutputProcessing, handleProcessCompletion) read these fields
 	// under the same mutex.
@@ -440,10 +452,11 @@ func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts 
 		c.ctx = nil
 		c.cancel = nil
 		c.mu.Unlock()
+		cancel()
 		if stateErr := c.setState(StateFailed); stateErr != nil {
 			slog.Warn("Failed to set failed state", "error", stateErr)
 		}
-		return nil, fmt.Errorf("failed to create process: %w", err)
+		return nil, nil, fmt.Errorf("failed to create process: %w", err)
 	}
 
 	c.mu.Lock()
@@ -459,13 +472,14 @@ func (c *Controller) startProcess(ctx context.Context, p *profile.Profile, opts 
 		c.ctx = nil
 		c.cancel = nil
 		c.mu.Unlock()
+		cancel()
 		if stateErr := c.setState(StateFailed); stateErr != nil {
 			slog.Warn("Failed to set failed state", "error", stateErr)
 		}
-		return nil, fmt.Errorf("failed to start openfortivpn: %w", err)
+		return nil, nil, fmt.Errorf("failed to start openfortivpn: %w", err)
 	}
 
-	return process, nil
+	return process, cancel, nil
 }
 
 // setupCredentialInput writes the password and OTP to stdin, each on its own
@@ -519,16 +533,27 @@ const (
 	outputScannerMaxLineSize = 1024 * 1024
 )
 
-// setupOutputProcessing starts goroutines to process stdout and stderr.
-// The goroutines respect context cancellation and will stop processing
-// when the context is cancelled.
-func (c *Controller) setupOutputProcessing(process Process) {
+// setupOutputProcessing starts goroutines to process stdout and stderr. The
+// goroutines stop when the context is cancelled. The returned WaitGroup
+// completes once both have finished reading, so callers can order work after
+// the output.
+func (c *Controller) setupOutputProcessing(process Process) *sync.WaitGroup {
 	c.mu.RLock()
 	ctx := c.ctx
 	c.mu.RUnlock()
 
-	go c.scanOutput(ctx, "stdout", process.Stdout())
-	go c.scanOutput(ctx, "stderr", process.Stderr())
+	var outputDone sync.WaitGroup
+	outputDone.Add(2)
+	go func() {
+		defer outputDone.Done()
+		c.scanOutput(ctx, "stdout", process.Stdout())
+	}()
+	go func() {
+		defer outputDone.Done()
+		c.scanOutput(ctx, "stderr", process.Stderr())
+	}()
+
+	return &outputDone
 }
 
 // scanOutput reads one output stream line by line until EOF or context
@@ -553,7 +578,7 @@ func (c *Controller) scanOutput(ctx context.Context, streamName string, r io.Rea
 	// Scanner errors when pipe closes are expected during normal process exit
 	// Don't emit errors if context was cancelled (intentional shutdown)
 	err := scanner.Err()
-	if err == nil || errors.Is(err, io.ErrClosedPipe) {
+	if err == nil || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed) {
 		return
 	}
 	select {
@@ -568,27 +593,66 @@ func (c *Controller) scanOutput(ctx context.Context, streamName string, r io.Rea
 	c.emitError(fmt.Errorf("%s scanner error: %w", streamName, err))
 }
 
-// handleProcessCompletion waits for the process to exit and cleans up resources.
-// It always transitions to disconnected state when the process exits, regardless
-// of whether the context was cancelled (intentional disconnect) or the process
-// exited on its own.
-func (c *Controller) handleProcessCompletion(process Process) {
+// waitForOutputDrain blocks until the output scanners have finished reading, or
+// until the drain timeout elapses.
+func waitForOutputDrain(outputDone *sync.WaitGroup, timeout time.Duration) {
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		outputDone.Wait()
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(timeout):
+		slog.Warn("Timed out waiting for openfortivpn output to drain; final output lines may be missing")
+	}
+}
+
+// handleProcessCompletion waits for the process to exit however it was
+// terminated, lets the output scanners finish, cleans up resources, and then
+// transitions to disconnected. Draining before the state change is what keeps
+// the final error line ahead of the terminal state the UI reacts to.
+func (c *Controller) handleProcessCompletion(process Process, outputDone *sync.WaitGroup, cancel context.CancelFunc) {
 	go func() {
 		// Wait error is intentionally ignored - we're cleaning up regardless
 		_ = process.Wait()
 
+		// The pipes outlive Wait (see newCmdWithPipes), so the scanners reach
+		// the last line on their own; closing afterwards releases them even if
+		// something else still holds the write ends.
+		waitForOutputDrain(outputDone, c.outputDrainTimeout)
+		_ = process.Stdout().Close()
+		_ = process.Stderr().Close()
+
+		// Release this connection's context. The process is already reaped, so
+		// the context-driven kill is a no-op; what this stops is a scanner that
+		// outlived the drain feeding stale lines to a newer connection.
+		cancel()
+
+		// A failure state re-enables Connect, so a newer process may already own
+		// the controller. Touch nothing in that case: reporting a terminal state
+		// would leave the live connection unstoppable from the UI.
 		c.mu.Lock()
-		c.process = nil
-		c.ctx = nil
-		c.cancel = nil
-		if c.stdin != nil {
-			if err := c.stdin.Close(); err != nil {
-				slog.Warn("Failed to close stdin pipe", "error", err)
+		owned := c.process == process
+		if owned {
+			c.process = nil
+			c.ctx = nil
+			c.cancel = nil
+			if c.stdin != nil {
+				if err := c.stdin.Close(); err != nil {
+					slog.Warn("Failed to close stdin pipe", "error", err)
+				}
 			}
+			c.stdin = nil
 		}
-		c.stdin = nil
 		currentState := c.state
 		c.mu.Unlock()
+
+		if !owned {
+			slog.Debug("Skipping completion cleanup: a newer connection owns the controller")
+			return
+		}
 
 		// Transition to disconnected if we're still in a connected/connecting state
 		if currentState == StateConnected || currentState == StateConnecting || currentState == StateAuthenticating {
