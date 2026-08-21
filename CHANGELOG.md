@@ -42,10 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cached with no way to correct it short of deleting the profile. Profiles using
   a one-time password are excluded: a rejected token reports the same error as a
   rejected password, and acting on it would discard a working password.
-- The `openfortivpn_path` setting in `config.json` now takes effect. It was
-  saved and validated but never read, so a binary installed outside the
-  expected location could not be selected. If the configured path cannot be
-  found, the binary is looked up on `PATH` as before.
+- The `openfortivpn_path` setting in `config.json` now takes effect for
+  connections made without the helper daemon. It was saved and validated but
+  never read, so a binary installed outside the expected location could not be
+  selected. If the configured path cannot be found, the binary is looked up on
+  `PATH` as before. The helper daemon resolves its own binary — deliberately,
+  since accepting a path over its socket would let any member of the
+  `openfortivpn-gui` group choose what runs as root — so the setting is
+  reported as unused when connecting through it. Point the daemon elsewhere
+  with its `-openfortivpn` flag.
 - The address assigned by the VPN is no longer left on screen while the
   connection is being re-established. It was only cleared on disconnect and
   failure, so the previous tunnel's address stayed visible under

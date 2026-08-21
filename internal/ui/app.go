@@ -86,6 +86,7 @@ func NewApp(cfg *AppConfig) (*App, error) {
 	if openfortivpnPath == "" {
 		openfortivpnPath = configManager.GetConfig().OpenFortiVPNPath
 	}
+	configuredPath := openfortivpnPath
 
 	// Validate the openfortivpn binary can be found
 	resolvedPath, err := resolveOpenfortivpnPath(openfortivpnPath)
@@ -114,6 +115,13 @@ func NewApp(cfg *AppConfig) (*App, error) {
 			vpnController = vpn.NewController(openfortivpnPath)
 		} else {
 			slog.Info("Using helper daemon for VPN operations (no password prompts)")
+			// The daemon resolves its own binary and is never told this path —
+			// accepting one over the socket would let any group member choose
+			// what runs as root. Say so rather than ignoring the setting.
+			if configuredPath != "" {
+				slog.Warn("openfortivpn_path is not used in helper mode; set the daemon's -openfortivpn flag instead",
+					"openfortivpn_path", configuredPath)
+			}
 			vpnController = helperClient
 			usingHelper = true
 		}
@@ -512,6 +520,12 @@ func (a *App) ensureWindow() {
 		reconnectManager.SetPasswordProvider(a.keyringStore)
 		reconnectManager.SetContext(a.ctx)
 		reconnectManager.SetConnectFunc(func(ctx context.Context, p *profile.Profile, password string) error {
+			// Record the in-flight profile as doConnect does. This path calls
+			// the controller directly, so without it a password rejected on an
+			// automatic attempt could not be invalidated.
+			if a.window != nil {
+				a.window.connectingProfile = p
+			}
 			opts := &vpn.ConnectOptions{Password: password}
 			return a.vpnController.Connect(ctx, p, opts)
 		})
