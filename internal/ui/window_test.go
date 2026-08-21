@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/shini4i/openfortivpn-gui/internal/keyring"
+	"github.com/shini4i/openfortivpn-gui/internal/profile"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
 
@@ -81,4 +83,170 @@ func TestMainWindow_HandleEvent_MarshalsToMainThread(t *testing.T) {
 	}, "event handler must not touch GTK on the caller goroutine")
 
 	assert.Len(t, scheduled, 1, "event handling must be marshaled to the main thread")
+}
+
+// fakeKeyring records Delete calls so tests can assert whether a stored
+// password was discarded.
+type fakeKeyring struct {
+	password string
+	deleted  []string
+	getErr   error
+	delErr   error
+}
+
+func (f *fakeKeyring) Save(profileID, password string) error {
+	f.password = password
+	return nil
+}
+
+func (f *fakeKeyring) Get(profileID string) (string, error) {
+	return f.password, f.getErr
+}
+
+func (f *fakeKeyring) Delete(profileID string) error {
+	f.deleted = append(f.deleted, profileID)
+	return f.delErr
+}
+
+// TestMainWindow_DiscardRejectedPassword asserts a stored password is dropped
+// only when the gateway actually rejected the credentials, so the next connect
+// re-prompts instead of silently reusing a password that cannot work — and is
+// kept for every other kind of failure.
+func TestMainWindow_DiscardRejectedPassword(t *testing.T) {
+	const profileID = "3f8a1c6e-1d2b-4c9a-8e7f-0a1b2c3d4e5f"
+
+	newWindow := func(kr keyring.Store, connecting *profile.Profile) *MainWindow {
+		return &MainWindow{
+			deps:              &MainWindowDeps{KeyringStore: kr},
+			connectingProfile: connecting,
+			scheduleOnMain:    func(fn func()) { fn() },
+		}
+	}
+
+	passwordProfile := func() *profile.Profile {
+		return &profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodPassword}
+	}
+
+	// A rejected one-time password produces the same gateway error as a
+	// rejected password, so the stored account password must survive it —
+	// otherwise every expired token destroys a credential the UI cannot show.
+	t.Run("OTP failure keeps the stored password", func(t *testing.T) {
+		kr := &fakeKeyring{password: "right"}
+		w := newWindow(kr, &profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodOTP})
+
+		w.discardRejectedPassword(errors.New(
+			"Could not authenticate to gateway. Please check the password, client certificate, etc."))
+
+		assert.Empty(t, kr.deleted, "a rejected token must not invalidate the account password")
+	})
+
+	t.Run("credential failure discards the stored password", func(t *testing.T) {
+		kr := &fakeKeyring{password: "wrong"}
+		w := newWindow(kr, passwordProfile())
+
+		w.discardRejectedPassword(errors.New(
+			"Could not authenticate to gateway. Please check the password, client certificate, etc."))
+
+		assert.Equal(t, []string{profileID}, kr.deleted)
+	})
+
+	t.Run("realm failure keeps the stored password", func(t *testing.T) {
+		kr := &fakeKeyring{password: "right"}
+		w := newWindow(kr, passwordProfile())
+
+		w.discardRejectedPassword(errors.New(
+			"Could not authenticate to the gateway. Please make sure tunnel mode is allowed by the gateway, check the realm, etc."))
+
+		assert.Empty(t, kr.deleted, "a realm problem must not invalidate the password")
+	})
+
+	t.Run("unrelated error keeps the stored password", func(t *testing.T) {
+		kr := &fakeKeyring{password: "right"}
+		w := newWindow(kr, passwordProfile())
+
+		w.discardRejectedPassword(errors.New("connection refused"))
+
+		assert.Empty(t, kr.deleted)
+	})
+
+	t.Run("no in-flight profile is a no-op", func(t *testing.T) {
+		kr := &fakeKeyring{password: "wrong"}
+		w := newWindow(kr, nil)
+
+		assert.NotPanics(t, func() {
+			w.discardRejectedPassword(errors.New(
+				"Could not authenticate to gateway. Please check the password, client certificate, etc."))
+		})
+		assert.Empty(t, kr.deleted)
+	})
+
+	t.Run("keyring delete failure is tolerated", func(t *testing.T) {
+		kr := &fakeKeyring{password: "wrong", delErr: errors.New("keyring locked")}
+		w := newWindow(kr, passwordProfile())
+
+		assert.NotPanics(t, func() {
+			w.discardRejectedPassword(errors.New(
+				"Could not authenticate to gateway. Please check the password, client certificate, etc."))
+		})
+		assert.Equal(t, []string{profileID}, kr.deleted,
+			"the delete must be attempted before its failure is swallowed")
+	})
+
+	t.Run("nil error is a no-op", func(t *testing.T) {
+		kr := &fakeKeyring{password: "right"}
+		w := newWindow(kr, passwordProfile())
+
+		w.discardRejectedPassword(nil)
+
+		assert.Empty(t, kr.deleted)
+	})
+
+	// Tray-only paths build a window with partial deps, so losing this guard
+	// would turn any VPN error into a nil-interface panic on the main thread.
+	t.Run("missing keyring store is a no-op", func(t *testing.T) {
+		w := &MainWindow{
+			deps:              &MainWindowDeps{},
+			connectingProfile: passwordProfile(),
+			scheduleOnMain:    func(fn func()) { fn() },
+		}
+
+		assert.NotPanics(t, func() {
+			w.discardRejectedPassword(errors.New(
+				"Could not authenticate to gateway. Please check the password, client certificate, etc."))
+		})
+	})
+}
+
+// TestMainWindow_ReleaseConnectingProfile asserts the in-flight profile is
+// forgotten once an attempt finishes, so a late credential error cannot be
+// attributed to whichever profile is connected next.
+func TestMainWindow_ReleaseConnectingProfile(t *testing.T) {
+	tests := []struct {
+		state    vpn.ConnectionState
+		released bool
+	}{
+		{vpn.StateDisconnected, true},
+		{vpn.StateFailed, true},
+		{vpn.StateConnected, false},
+		{vpn.StateConnecting, false},
+		{vpn.StateAuthenticating, false},
+		{vpn.StateReconnecting, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.state), func(t *testing.T) {
+			w := &MainWindow{
+				deps:              &MainWindowDeps{},
+				connectingProfile: &profile.Profile{ID: "in-flight"},
+			}
+
+			w.releaseConnectingProfile(tt.state)
+
+			if tt.released {
+				assert.Nil(t, w.connectingProfile, "a finished attempt must be forgotten")
+			} else {
+				assert.NotNil(t, w.connectingProfile, "an in-progress attempt must be retained")
+			}
+		})
+	}
 }

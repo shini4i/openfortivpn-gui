@@ -113,6 +113,18 @@ func (p *Profile) Validate() error {
 	return nil
 }
 
+// NeedsPassword reports whether the method requires a password from the user.
+// Certificate auth proves identity with the key pair and SAML collects
+// credentials in the browser, so neither has one to prompt for or to store.
+func (m AuthMethod) NeedsPassword() bool {
+	switch m {
+	case AuthMethodPassword, AuthMethodOTP:
+		return true
+	default:
+		return false
+	}
+}
+
 // ValidAuthMethods returns all valid authentication methods.
 func ValidAuthMethods() []AuthMethod {
 	return []AuthMethod{

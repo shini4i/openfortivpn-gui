@@ -433,3 +433,22 @@ func TestValidAuthMethods(t *testing.T) {
 	assert.Contains(t, methods, AuthMethodCertificate)
 	assert.Contains(t, methods, AuthMethodSAML)
 }
+
+func TestAuthMethod_NeedsPassword(t *testing.T) {
+	tests := []struct {
+		method AuthMethod
+		want   bool
+	}{
+		{AuthMethodPassword, true},
+		{AuthMethodOTP, true},
+		{AuthMethodCertificate, false},
+		{AuthMethodSAML, false},
+		{AuthMethod("unknown"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.method), func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.method.NeedsPassword())
+		})
+	}
+}

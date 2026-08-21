@@ -20,6 +20,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Tray menu entries were created on the tray's own thread while the main window
   could already be updating them, so an update could reach an entry that did
   not exist yet. Whether it did depended on thread timing.
+- Certificate-authentication profiles can now connect. Connecting demanded a
+  keyring password for every method except SAML, so a certificate profile was
+  held behind a prompt for a credential it has no concept of — and entering an
+  arbitrary value to get past it was the only way through. Auto-reconnect no
+  longer refuses these profiles for the same reason.
+- Submitting the password dialog with an empty field no longer dismisses it and
+  silently abandons the connection. Connect stays disabled until a password is
+  entered, so the dialog can only close by connecting or being cancelled.
+- A password the gateway rejects is now discarded from the keyring, so the next
+  connection prompts for it again. Previously the password was stored before it
+  was ever validated and reused unchecked from then on, leaving a mistyped one
+  cached with no way to correct it short of deleting the profile. Profiles using
+  a one-time password are excluded: a rejected token reports the same error as a
+  rejected password, and acting on it would discard a working password.
+- The `openfortivpn_path` setting in `config.json` now takes effect. It was
+  saved and validated but never read, so a binary installed outside the
+  expected location could not be selected. If the configured path cannot be
+  found, the binary is looked up on `PATH` as before.
 
 ## [0.3.6] - 2026-07-27
 

@@ -15,9 +15,8 @@ func main() {
 	// Initialize structured logging
 	logging.SetupFromEnv()
 
-	// Create application with default configuration
+	// No override: take the openfortivpn path from the stored configuration.
 	app, err := ui.NewApp(&ui.AppConfig{
-		// Use PATH lookup for openfortivpn by default
 		OpenfortivpnPath: "",
 	})
 	if err != nil {

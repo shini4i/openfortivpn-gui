@@ -326,8 +326,8 @@ func (m *Manager) performReconnect() {
 
 	// Determine password based on auth method
 	var password string
-	if p.AuthMethod == profile.AuthMethodSAML {
-		// SAML doesn't need a stored password
+	if !p.AuthMethod.NeedsPassword() {
+		// Certificate and SAML auth carry no stored password
 		password = ""
 	} else {
 		if passwordProvider == nil {

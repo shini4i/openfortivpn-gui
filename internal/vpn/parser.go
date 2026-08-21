@@ -78,6 +78,16 @@ var (
 	passwordPattern = regexp.MustCompile(`(?i)(password:)`)
 )
 
+// IsCredentialFailure reports whether an openfortivpn error means the gateway
+// rejected the credentials. A near-identical "Could not authenticate" error
+// covers realm and tunnel-mode problems, so the clause naming the password is
+// what separates them; anything unrecognized reports false.
+func IsCredentialFailure(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "could not authenticate") &&
+		strings.Contains(lower, "check the password")
+}
+
 // ParseLine parses a single line of openfortivpn output and returns an event if recognized.
 // Returns nil if the line doesn't match any known pattern.
 func ParseLine(line string) *OutputEvent {

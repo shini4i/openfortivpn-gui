@@ -401,3 +401,39 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, 3, cfg.MaxAttempts)
 	assert.Equal(t, 5, cfg.DelaySeconds)
 }
+
+// TestManager_PerformReconnect_Certificate_NoPassword asserts a certificate
+// profile reconnects without a keyring password. Certificate auth proves
+// identity with the key pair, so demanding a stored password would abort every
+// auto-reconnect for these profiles.
+func TestManager_PerformReconnect_Certificate_NoPassword(t *testing.T) {
+	var connectedPassword string
+	var failed error
+	done := make(chan struct{})
+
+	m := NewManager(DefaultConfig(), nil)
+	m.lastConnectedProfile = &profile.Profile{
+		ID:         "cert-id",
+		Name:       "Certificate Profile",
+		AuthMethod: profile.AuthMethodCertificate,
+	}
+	// Deliberately no password provider: a certificate profile has no stored
+	// password, so needing one would be the bug.
+	m.callbacks = Callbacks{OnFailed: func(err error) { failed = err }}
+	m.connectFunc = func(ctx context.Context, p *profile.Profile, password string) error {
+		connectedPassword = password
+		close(done)
+		return nil
+	}
+
+	m.performReconnect()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("connect was not called for a certificate profile")
+	}
+
+	assert.Equal(t, "", connectedPassword)
+	assert.NoError(t, failed, "certificate reconnect must not report a password failure")
+}
