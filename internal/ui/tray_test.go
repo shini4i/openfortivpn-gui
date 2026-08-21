@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"fyne.io/systray"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/shini4i/openfortivpn-gui/internal/stats"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
 
@@ -289,4 +291,192 @@ func TestTrayIcon_CallbacksNilByDefault(t *testing.T) {
 	assert.Nil(t, tray.onDisconnect, "onDisconnect should be nil by default")
 	assert.Nil(t, tray.onShow, "onShow should be nil by default")
 	assert.Nil(t, tray.onQuit, "onQuit should be nil by default")
+}
+
+// fakeMenuItem builds a menu entry for tests. Entries not created by
+// systray.AddMenuItem are absent from systray's registry, which makes
+// SetTitle/Enable/Disable safe no-ops on them — but Show and Hide panic, so a
+// test must never drive a path that calls those.
+func fakeMenuItem() *systray.MenuItem {
+	return &systray.MenuItem{ClickedCh: make(chan struct{}, 1)}
+}
+
+// fakeTrayMenu builds a fully populated menu of fake entries.
+func fakeTrayMenu() trayMenu {
+	return trayMenu{
+		status:      fakeMenuItem(),
+		trafficRate: fakeMenuItem(),
+		connect:     fakeMenuItem(),
+		disconnect:  fakeMenuItem(),
+		show:        fakeMenuItem(),
+		quit:        fakeMenuItem(),
+	}
+}
+
+// TestTrayIcon_GuardsAgainstUnpublishedMenu asserts that the three update
+// entry points return early while the menu is unpublished. The tray is
+// constructed and wired before systray calls onReady, so the GTK main thread
+// can push updates during that window.
+func TestTrayIcon_GuardsAgainstUnpublishedMenu(t *testing.T) {
+	tray := NewTrayIcon()
+
+	assert.NotPanics(t, func() {
+		tray.SetProfileName("work-vpn")
+	}, "SetProfileName must not panic before the menu is published")
+
+	assert.NotPanics(t, func() {
+		tray.SetState(vpn.StateConnected)
+	}, "SetState must not panic before the menu is published")
+
+	assert.NotPanics(t, func() {
+		tray.SetStats(stats.NetworkStats{})
+	}, "SetStats must not panic before the menu is published")
+}
+
+// TestTrayIcon_HandleMenuClicksExitsWhenMenuUnpublished asserts the click
+// handler refuses to run without a published menu instead of blocking forever
+// or dereferencing an unset entry.
+func TestTrayIcon_HandleMenuClicksExitsWhenMenuUnpublished(t *testing.T) {
+	tray := NewTrayIcon()
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		tray.handleMenuClicks()
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleMenuClicks should return immediately when the menu is unpublished")
+	}
+}
+
+// TestTrayIcon_HandleMenuClicksDispatchesToCallbacks drives each menu entry's
+// click channel and asserts the matching callback runs.
+func TestTrayIcon_HandleMenuClicksDispatchesToCallbacks(t *testing.T) {
+	tray := NewTrayIcon()
+	menu := fakeTrayMenu()
+	tray.publishMenu(menu)
+
+	fired := make(chan string, 4)
+	assert.NoError(t, tray.OnConnect(func() { fired <- "connect" }))
+	assert.NoError(t, tray.OnDisconnect(func() { fired <- "disconnect" }))
+	assert.NoError(t, tray.OnShow(func() { fired <- "show" }))
+	assert.NoError(t, tray.OnQuit(func() { fired <- "quit" }))
+
+	go tray.handleMenuClicks()
+	defer tray.Quit()
+
+	cases := []struct {
+		name string
+		ch   chan struct{}
+	}{
+		{"connect", menu.connect.ClickedCh},
+		{"disconnect", menu.disconnect.ClickedCh},
+		{"show", menu.show.ClickedCh},
+		{"quit", menu.quit.ClickedCh},
+	}
+
+	for _, tc := range cases {
+		tc.ch <- struct{}{}
+
+		select {
+		case got := <-fired:
+			assert.Equal(t, tc.name, got, "click on %s should invoke its own callback", tc.name)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("callback for %s never fired", tc.name)
+		}
+	}
+}
+
+// TestTrayIcon_HandleMenuClicksStopsOnQuit asserts Quit terminates the click
+// handler so the goroutine does not outlive the tray.
+func TestTrayIcon_HandleMenuClicksStopsOnQuit(t *testing.T) {
+	tray := NewTrayIcon()
+	tray.publishMenu(fakeTrayMenu())
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		tray.handleMenuClicks()
+	}()
+
+	tray.Quit()
+
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleMenuClicks should return after Quit closes the done channel")
+	}
+}
+
+// TestTrayIcon_HandleMenuClicksStopsOnClosedChannel asserts the handler exits
+// when systray closes a click channel during teardown.
+func TestTrayIcon_HandleMenuClicksStopsOnClosedChannel(t *testing.T) {
+	tray := NewTrayIcon()
+	menu := fakeTrayMenu()
+	tray.publishMenu(menu)
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		tray.handleMenuClicks()
+	}()
+
+	close(menu.connect.ClickedCh)
+
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleMenuClicks should return when a click channel closes")
+	}
+}
+
+// TestTrayIcon_MenuItemPublicationIsAtomic reads the menu while it is being
+// published, the way the GTK main thread pushes updates while onReady runs on
+// the systray goroutine. Run under -race, which is what actually proves the
+// publication is synchronized; the assertions below cover the visible effect.
+func TestTrayIcon_MenuItemPublicationIsAtomic(t *testing.T) {
+	assertWholeMenu := func(menu trayMenu) {
+		assert.NotNil(t, menu.trafficRate, "trafficRate must be published with status")
+		assert.NotNil(t, menu.connect, "connect must be published with status")
+		assert.NotNil(t, menu.disconnect, "disconnect must be published with status")
+		assert.NotNil(t, menu.show, "show must be published with status")
+		assert.NotNil(t, menu.quit, "quit must be published with status")
+	}
+
+	for i := 0; i < 50; i++ {
+		tray := NewTrayIcon()
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Publisher: stands in for onReady building the menu.
+		go func() {
+			defer wg.Done()
+			tray.publishMenu(fakeTrayMenu())
+		}()
+
+		// Reader: stands in for updateMenu on the GTK main thread. It spins so
+		// it observes the menu at the moment it appears rather than sampling
+		// once and usually finding nothing.
+		go func() {
+			defer wg.Done()
+			for attempt := 0; attempt < 10000; attempt++ {
+				_, _, menu := tray.snapshot()
+				if menu.status != nil {
+					assertWholeMenu(menu)
+					return
+				}
+			}
+		}()
+
+		wg.Wait()
+
+		// Whatever the interleaving was, the published menu is whole.
+		_, _, menu := tray.snapshot()
+		assert.NotNil(t, menu.status, "status must be published")
+		assertWholeMenu(menu)
+	}
 }

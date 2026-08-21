@@ -58,7 +58,8 @@ type App struct {
 
 // AppConfig holds configuration for creating a new App instance.
 type AppConfig struct {
-	// OpenfortivpnPath is the path to the openfortivpn binary.
+	// OpenfortivpnPath overrides the openfortivpn binary path from the stored
+	// configuration. Empty means use the configured path.
 	OpenfortivpnPath string
 }
 
@@ -79,17 +80,21 @@ func NewApp(cfg *AppConfig) (*App, error) {
 	// Initialize keyring store
 	keyringStore := keyring.NewSystemKeyring()
 
-	// Determine and validate openfortivpn path
+	// Determine the openfortivpn path: an explicit AppConfig value overrides
+	// the stored configuration, which in turn overrides a plain PATH lookup.
 	openfortivpnPath := cfg.OpenfortivpnPath
 	if openfortivpnPath == "" {
-		openfortivpnPath = "openfortivpn" // Use PATH lookup
+		openfortivpnPath = configManager.GetConfig().OpenFortiVPNPath
 	}
+	configuredPath := openfortivpnPath
 
 	// Validate the openfortivpn binary can be found
-	resolvedPath, err := validateOpenfortivpnPath(openfortivpnPath)
+	resolvedPath, err := resolveOpenfortivpnPath(openfortivpnPath)
 	if err != nil {
 		slog.Warn("openfortivpn not found", "path", openfortivpnPath, "error", err)
-		// Continue anyway - user might install it later, or path might become valid
+		// Fall back to the bare name: both pkexec and exec.Command resolve it
+		// against PATH at exec time, so a later install works without a restart.
+		openfortivpnPath = "openfortivpn"
 	} else {
 		openfortivpnPath = resolvedPath
 		slog.Debug("openfortivpn found", "path", openfortivpnPath)
@@ -110,6 +115,13 @@ func NewApp(cfg *AppConfig) (*App, error) {
 			vpnController = vpn.NewController(openfortivpnPath)
 		} else {
 			slog.Info("Using helper daemon for VPN operations (no password prompts)")
+			// The daemon resolves its own binary and is never told this path —
+			// accepting one over the socket would let any group member choose
+			// what runs as root. Say so rather than ignoring the setting.
+			if configuredPath != "" {
+				slog.Warn("openfortivpn_path is not used in helper mode; set the daemon's -openfortivpn flag instead",
+					"openfortivpn_path", configuredPath)
+			}
 			vpnController = helperClient
 			usingHelper = true
 		}
@@ -508,6 +520,12 @@ func (a *App) ensureWindow() {
 		reconnectManager.SetPasswordProvider(a.keyringStore)
 		reconnectManager.SetContext(a.ctx)
 		reconnectManager.SetConnectFunc(func(ctx context.Context, p *profile.Profile, password string) error {
+			// Record the in-flight profile as doConnect does. This path calls
+			// the controller directly, so without it a password rejected on an
+			// automatic attempt could not be invalidated.
+			if a.window != nil {
+				a.window.connectingProfile = p
+			}
 			opts := &vpn.ConnectOptions{Password: password}
 			return a.vpnController.Connect(ctx, p, opts)
 		})
@@ -551,9 +569,19 @@ func (a *App) ensureWindow() {
 	}
 }
 
-// validateOpenfortivpnPath validates that the openfortivpn binary exists and is executable.
-// If the path is not absolute, it attempts to resolve it using PATH lookup.
-// Returns the resolved absolute path on success, or an error if the binary cannot be found.
-func validateOpenfortivpnPath(path string) (string, error) {
-	return exec.LookPath(path)
+// resolveOpenfortivpnPath resolves the openfortivpn binary to an absolute path,
+// preferring the configured location and falling back to a PATH lookup when it
+// cannot be resolved. The fallback matters because the configured default
+// (/usr/bin/openfortivpn) is wrong on distributions that install it elsewhere.
+func resolveOpenfortivpnPath(configured string) (string, error) {
+	if configured != "" {
+		resolved, err := exec.LookPath(configured)
+		if err == nil {
+			return resolved, nil
+		}
+		slog.Debug("Configured openfortivpn path did not resolve, trying PATH",
+			"path", configured, "error", err)
+	}
+
+	return exec.LookPath("openfortivpn")
 }

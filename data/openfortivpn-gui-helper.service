@@ -23,6 +23,12 @@ Group=openfortivpn-gui
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
+
+# Exception to ProtectSystem=strict: with --set-dns=1 (the profile default) and
+# no resolvconf binary on the host, openfortivpn rewrites /etc/resolv.conf in
+# place; without this the tunnel comes up with DNS silently unapplied. Hosts
+# that do have resolvconf take that branch instead and never reach this path.
+ReadWritePaths=-/etc/resolv.conf
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

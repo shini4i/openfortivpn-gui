@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -402,6 +403,7 @@ func TestResolvePathSafely(t *testing.T) {
 // the registered callbacks so tests can fire controller events directly.
 type mockController struct {
 	mu            sync.Mutex
+	connectCalls  int
 	state         vpn.ConnectionState
 	connectErr    error
 	onStateChange func(old, new vpn.ConnectionState)
@@ -424,7 +426,18 @@ func (c *mockController) GetInterface() string  { return "" }
 func (c *mockController) CanConnect() bool      { return c.GetState().CanConnect() }
 func (c *mockController) CanDisconnect() bool   { return c.GetState().CanDisconnect() }
 func (c *mockController) Connect(_ context.Context, _ *profile.Profile, _ *vpn.ConnectOptions) error {
+	c.mu.Lock()
+	c.connectCalls++
+	c.mu.Unlock()
 	return c.connectErr
+}
+
+// connectCallCount reports how many times Connect was invoked, so a test can
+// prove a rejected request never reached the controller.
+func (c *mockController) connectCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connectCalls
 }
 func (c *mockController) Disconnect(_ context.Context) error { return nil }
 func (c *mockController) OnStateChange(cb func(old, new vpn.ConnectionState)) {
@@ -586,4 +599,48 @@ func TestNewManagerWithController_NilSenderPanics(t *testing.T) {
 	assert.Panics(t, func() {
 		NewManagerWithController(newMockController(), nil)
 	})
+}
+
+// TestHandleConnect_RejectsUnscreenedTextParams asserts the daemon screens the
+// free-text parameters it accepts over the socket before they can reach
+// openfortivpn's argument vector. Every member of the openfortivpn-gui group
+// can send these, so Validate is the boundary that has to hold.
+func TestHandleConnect_RejectsUnscreenedTextParams(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(p *protocol.ConnectParams)
+	}{
+		{"null byte in username", func(p *protocol.ConnectParams) { p.Username = "user\x00name" }},
+		{"newline in realm", func(p *protocol.ConnectParams) { p.Realm = "corp\nrealm" }},
+		{"overlong trusted certificate", func(p *protocol.ConnectParams) {
+			p.TrustedCert = strings.Repeat("a", 200)
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := newMockController()
+			m := NewManagerWithController(ctrl, newRecordingSender())
+
+			params := protocol.ConnectParams{
+				ProfileID:  "550e8400-e29b-41d4-a716-446655440000",
+				Host:       "vpn.example.com",
+				Port:       443,
+				Username:   "user",
+				AuthMethod: "password",
+			}
+			tt.mutate(&params)
+
+			req, err := protocol.NewRequest("req-1", protocol.CommandConnect, params)
+			require.NoError(t, err)
+
+			resp := m.HandleRequest(req, "client-A")
+
+			require.False(t, resp.Success, "malformed params must be rejected")
+			require.NotNil(t, resp.Error)
+			assert.Equal(t, protocol.ErrCodeProfileInvalid, resp.Error.Code)
+			assert.Zero(t, ctrl.connectCallCount(),
+				"the controller must never be reached with unscreened params")
+		})
+	}
 }

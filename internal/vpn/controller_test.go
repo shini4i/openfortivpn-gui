@@ -1145,3 +1145,34 @@ func TestController_Disconnect_GracefulBeforeContextCancel(t *testing.T) {
 		t.Fatal("process did not exit after Disconnect")
 	}
 }
+
+// TestController_ProcessOutput_Error_EmitsErrorBeforeStateChange pins the
+// emission order the UI depends on: the error callback must run before the
+// terminal state change, because the state change is what forgets the in-flight
+// profile the error handler needs to invalidate a rejected password.
+func TestController_ProcessOutput_Error_EmitsErrorBeforeStateChange(t *testing.T) {
+	ctrl := NewController("/usr/bin/openfortivpn")
+	_ = ctrl.setState(StateConnecting)
+
+	var mu sync.Mutex
+	var sequence []string
+
+	ctrl.OnError(func(error) {
+		mu.Lock()
+		defer mu.Unlock()
+		sequence = append(sequence, "error")
+	})
+	ctrl.OnStateChange(func(_, newState ConnectionState) {
+		mu.Lock()
+		defer mu.Unlock()
+		sequence = append(sequence, "state:"+string(newState))
+	})
+
+	ctrl.processOutput(
+		"ERROR:  Could not authenticate to gateway. Please check the password, client certificate, etc.")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"error", "state:failed"}, sequence,
+		"the error must reach the UI before the profile is forgotten")
+}

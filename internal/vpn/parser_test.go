@@ -253,3 +253,82 @@ func TestOutputEvent_GetData_NilData(t *testing.T) {
 
 	assert.Equal(t, "", event.GetData("anything"))
 }
+
+func TestIsCredentialFailure(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    bool
+	}{
+		{
+			name:    "gateway rejected the password",
+			message: "Could not authenticate to gateway. Please check the password, client certificate, etc.",
+			want:    true,
+		},
+		{
+			name:    "realm or tunnel mode problem is not a credential failure",
+			message: "Could not authenticate to the gateway. Please make sure tunnel mode is allowed by the gateway, check the realm, etc.",
+			want:    false,
+		},
+		{
+			name:    "case insensitive",
+			message: "could not authenticate to gateway. please check the password, client certificate, etc.",
+			want:    true,
+		},
+		{
+			name:    "unrelated error",
+			message: "Could not connect to gateway: connection refused",
+			want:    false,
+		},
+		{
+			name:    "tunnel down is not a credential failure",
+			message: "Tunnel is down",
+			want:    false,
+		},
+		{
+			name:    "empty message",
+			message: "",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsCredentialFailure(tt.message))
+		})
+	}
+}
+
+// TestParseLine_CredentialFailureReachesMatcher pins the contract between
+// ParseLine and IsCredentialFailure: the matcher only ever sees an event
+// Message, so a change to how the ERROR prefix is stripped must not silently
+// stop the credential-failure path from firing. Lines are openfortivpn's
+// verbatim log_error output (tunnel.c and io.c).
+func TestParseLine_CredentialFailureReachesMatcher(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{
+			name: "rejected credentials",
+			line: "ERROR:  Could not authenticate to gateway. Please check the password, client certificate, etc.",
+			want: true,
+		},
+		{
+			name: "realm or tunnel mode refused",
+			line: "ERROR:  Could not authenticate to the gateway. Please make sure tunnel mode is allowed by the gateway, check the realm, etc.",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := ParseLine(tt.line)
+
+			require.NotNil(t, event, "an ERROR line must parse into an event")
+			assert.Equal(t, EventError, event.Type)
+			assert.Equal(t, tt.want, IsCredentialFailure(event.Message))
+		})
+	}
+}

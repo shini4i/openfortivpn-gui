@@ -17,7 +17,7 @@ const (
 )
 
 // appendLogLine appends line to lines and trims the oldest entries back to
-// max once the slice overshoots max+chunk. Returns the updated slice and
+// max once the slice reaches max+chunk. Returns the updated slice and
 // whether a trim occurred (the caller must then rebuild its display buffer).
 func appendLogLine(lines []string, line string, max, chunk int) ([]string, bool) {
 	lines = append(lines, line)

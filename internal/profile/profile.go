@@ -22,6 +22,14 @@ const (
 	// Maximum lengths for text fields to prevent UI issues.
 	maxNameLength        = 100
 	maxDescriptionLength = 500
+
+	// Limits for the fields handed to openfortivpn's argument vector, generous
+	// on purpose: the point is to screen control characters and absurd input,
+	// not to second-guess a gateway. --trusted-cert takes a SHA-256 digest (64
+	// hex chars); 128 is headroom for a pasted colon-separated fingerprint.
+	maxUsernameLength    = 256
+	maxRealmLength       = 256
+	maxTrustedCertLength = 128
 )
 
 // Profile represents a VPN connection configuration.
@@ -93,6 +101,19 @@ func (p *Profile) Validate() error {
 		return fmt.Errorf("port must be between 1 and 65535, got %d", p.Port)
 	}
 
+	// Screened for the same reasons as the fields above: these three reach
+	// openfortivpn's argument vector, and the helper daemon relies on Validate
+	// as the gate for parameters supplied over its socket.
+	if err := validateTextInput(p.Username, "username", maxUsernameLength); err != nil {
+		return err
+	}
+	if err := validateTextInput(p.Realm, "realm", maxRealmLength); err != nil {
+		return err
+	}
+	if err := validateTextInput(p.TrustedCert, "trusted certificate", maxTrustedCertLength); err != nil {
+		return err
+	}
+
 	switch p.AuthMethod {
 	case AuthMethodPassword, AuthMethodOTP, AuthMethodSAML:
 		// Username may be optional for SAML
@@ -111,6 +132,18 @@ func (p *Profile) Validate() error {
 	}
 
 	return nil
+}
+
+// NeedsPassword reports whether the method requires a password from the user.
+// Certificate auth proves identity with the key pair and SAML collects
+// credentials in the browser, so neither has one to prompt for or to store.
+func (m AuthMethod) NeedsPassword() bool {
+	switch m {
+	case AuthMethodPassword, AuthMethodOTP:
+		return true
+	default:
+		return false
+	}
 }
 
 // ValidAuthMethods returns all valid authentication methods.

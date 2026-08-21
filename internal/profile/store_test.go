@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -386,4 +387,49 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestStore_Save_PersistsDraftValuesValidateRejects pins the split between
+// saving and validating: Save keeps drafts so an editor can persist work in
+// progress, and Validate is the gate that runs before connecting. A value over
+// the cap therefore round-trips through disk and is refused only at connect.
+func TestStore_Save_PersistsDraftValuesValidateRejects(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		set   func(p *Profile)
+	}{
+		{
+			name:  "overlong trusted certificate",
+			field: "trusted certificate",
+			set:   func(p *Profile) { p.TrustedCert = strings.Repeat("a", maxTrustedCertLength+1) },
+		},
+		{
+			name:  "overlong username",
+			field: "username",
+			set:   func(p *Profile) { p.Username = strings.Repeat("u", maxUsernameLength+1) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+
+			p := NewProfile("Draft")
+			p.Host = "vpn.example.com"
+			p.Username = "user"
+			tt.set(p)
+
+			require.NoError(t, store.Save(p), "a draft must persist without validation")
+
+			loaded, err := store.Load(p.ID)
+			require.NoError(t, err)
+			assert.Equal(t, p, loaded, "the draft must round-trip unchanged")
+
+			err = loaded.Validate()
+			require.Error(t, err, "connecting must refuse the draft")
+			assert.Contains(t, err.Error(), tt.field)
+		})
+	}
 }

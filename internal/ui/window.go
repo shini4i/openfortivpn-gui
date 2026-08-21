@@ -61,6 +61,11 @@ type MainWindow struct {
 	// State
 	selectedProfile *profile.Profile
 
+	// connectingProfile is the profile whose connection is in flight. It
+	// identifies whose stored password to discard when the gateway rejects the
+	// credentials, since error events carry no profile of their own.
+	connectingProfile *profile.Profile
+
 	// Callbacks
 	onProfileConnecting func(profileID string)
 
@@ -290,6 +295,8 @@ func (w *MainWindow) setupCallbacks() {
 // onto the main thread via scheduleOnMain.
 func (w *MainWindow) handleStateChange(oldState, newState vpn.ConnectionState) {
 	w.scheduleOnMain(func() {
+		w.releaseConnectingProfile(newState)
+
 		// Reset reconnect state on successful connection
 		if newState == vpn.StateConnected && w.deps.ReconnectManager != nil {
 			w.deps.ReconnectManager.OnConnectionSucceeded()
@@ -359,8 +366,49 @@ func (w *MainWindow) handleStateChange(oldState, newState vpn.ConnectionState) {
 // the work is marshaled onto the main thread via scheduleOnMain.
 func (w *MainWindow) handleError(err error) {
 	w.scheduleOnMain(func() {
+		w.discardRejectedPassword(err)
 		w.showError("VPN Error", err.Error())
 	})
+}
+
+// releaseConnectingProfile forgets the in-flight profile once its attempt has
+// finished, so a late credential error cannot discard the stored password of
+// whichever profile is connecting by then. A terminal state that overtakes the
+// error it belongs to therefore skips the discard (see issue #27).
+func (w *MainWindow) releaseConnectingProfile(newState vpn.ConnectionState) {
+	if newState == vpn.StateDisconnected || newState == vpn.StateFailed {
+		w.connectingProfile = nil
+	}
+}
+
+// discardRejectedPassword deletes the in-flight profile's stored password when
+// the gateway rejected it. Without this a mistyped password stays cached and
+// every later connect silently reuses it, since connect() only prompts when the
+// keyring lookup comes back empty — leaving no way to correct it from the UI.
+func (w *MainWindow) discardRejectedPassword(err error) {
+	if err == nil || w.connectingProfile == nil || w.deps.KeyringStore == nil {
+		return
+	}
+	if !vpn.IsCredentialFailure(err.Error()) {
+		return
+	}
+
+	// Only when the password is the sole credential. A rejected one-time
+	// password yields the same gateway error, so acting on it for OTP profiles
+	// would delete the still-valid account password on every expired token.
+	if w.connectingProfile.AuthMethod != profile.AuthMethodPassword {
+		return
+	}
+
+	profileID := w.connectingProfile.ID
+	if delErr := w.deps.KeyringStore.Delete(profileID); delErr != nil {
+		slog.Warn("Failed to discard rejected password",
+			"profile_id", profileID, "error", delErr)
+		return
+	}
+
+	slog.Info("Discarded rejected password; the next connection will prompt again",
+		"profile_id", profileID)
 }
 
 // handleEvent reacts to parsed VPN output events (IP assignment, SAML auth).
@@ -545,8 +593,7 @@ func (w *MainWindow) connect() {
 		w.onProfileConnecting(currentProfile.ID)
 	}
 
-	// SAML authentication doesn't require password - credentials come from browser
-	if currentProfile.AuthMethod == profile.AuthMethodSAML {
+	if !currentProfile.AuthMethod.NeedsPassword() {
 		w.doConnect(currentProfile, &vpn.ConnectOptions{})
 		return
 	}
@@ -599,22 +646,35 @@ func (w *MainWindow) showPasswordDialog(p *profile.Profile) {
 	dialog.SetDefaultResponse("connect")
 	dialog.SetCloseResponse("cancel")
 
+	// Connect stays disabled until something is typed. AdwAlertDialog closes on
+	// any activated response, so an empty password cannot be rejected from
+	// inside the handler without silently dismissing the dialog; gating the
+	// response instead also stops Enter from activating it (see otp_dialog.go).
+	dialog.SetResponseEnabled("connect", false)
+	passwordEntry.ConnectChanged(func() {
+		dialog.SetResponseEnabled("connect", passwordEntry.Text() != "")
+	})
+
 	dialog.ConnectResponse(func(response string) {
-		if response == "connect" {
-			password := passwordEntry.Text()
-			if password != "" {
-				// Save password to keyring (log errors but don't block connection)
-				if err := w.deps.KeyringStore.Save(p.ID, password); err != nil {
-					slog.Warn("Failed to save password to keyring", "error", err, "profile_id", p.ID)
-				}
-				// OTP authentication requires an additional one-time password
-				if p.AuthMethod == profile.AuthMethodOTP {
-					w.showOTPDialog(p, password)
-					return
-				}
-				w.doConnect(p, &vpn.ConnectOptions{Password: password})
-			}
+		if response != "connect" {
+			return
 		}
+
+		// Only reachable with a non-empty password, per the gating above.
+		password := passwordEntry.Text()
+
+		// Save password to keyring (log errors but don't block connection)
+		if err := w.deps.KeyringStore.Save(p.ID, password); err != nil {
+			slog.Warn("Failed to save password to keyring", "error", err, "profile_id", p.ID)
+		}
+
+		// OTP authentication requires an additional one-time password
+		if p.AuthMethod == profile.AuthMethodOTP {
+			w.showOTPDialog(p, password)
+			return
+		}
+
+		w.doConnect(p, &vpn.ConnectOptions{Password: password})
 	})
 
 	dialog.Present(w.window)
@@ -636,6 +696,9 @@ func (w *MainWindow) showOTPDialog(p *profile.Profile, password string) {
 
 // doConnect performs the actual VPN connection.
 func (w *MainWindow) doConnect(p *profile.Profile, opts *vpn.ConnectOptions) {
+	// Remember whose credentials are in play so a rejection can invalidate them.
+	w.connectingProfile = p
+
 	// Clear previous logs
 	w.logDialog.Clear()
 

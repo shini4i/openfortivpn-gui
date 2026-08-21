@@ -44,7 +44,14 @@ tasks:
       - echo "Coverage report generated at coverage.html"
 
   lint:
-    desc: Run static analysis
+    desc: Run the same static analysis as CI
+    cmds:
+      - golangci-lint run
+      - gosec ./...
+      - govulncheck ./...
+
+  vet:
+    desc: Run go vet only (fast subset of lint)
     cmds:
       - go vet ./...
 
