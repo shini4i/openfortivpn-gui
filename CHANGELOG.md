@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Changing a profile's authentication method from password or 2FA to
+  certificate or SAML now removes its saved password from the system keyring.
+  The password used to be left behind, out of reach of the **Forget** button —
+  which is hidden for those methods — and was reused if the profile was ever
+  switched back to password authentication.
+
 ## [0.4.0] - 2026-08-21
 
 ### Added

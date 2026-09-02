@@ -267,13 +267,13 @@ func (w *MainWindow) setupCallbacks() {
 
 	// Profile save callback - save changes when user clicks Save
 	w.profileEditor.OnSave(func(p *profile.Profile) {
-		if err := w.deps.ProfileStore.Save(p); err != nil {
+		isNew, err := w.saveProfile(p)
+		if err != nil {
 			w.showError("Error Saving Profile", err.Error())
 			return
 		}
 
-		// Check if this is a new profile (not in list yet)
-		if w.profileList.GetProfileByID(p.ID) == nil {
+		if isNew {
 			// New profile - refresh the list and select it
 			w.loadProfiles()
 			w.profileList.SelectProfile(p.ID)
@@ -459,6 +459,48 @@ func (w *MainWindow) discardRejectedPassword(err error) {
 
 	slog.Info("Discarded rejected password; the next connection will prompt again",
 		"profile_id", profileID)
+}
+
+// saveProfile persists p and then drops a stored password the profile no
+// longer authenticates with. It reports whether p is new, meaning the profile
+// list does not track it yet.
+func (w *MainWindow) saveProfile(p *profile.Profile) (isNew bool, err error) {
+	// Read before the store write, while the list still holds the saved state.
+	previous := w.profileList.GetProfileByID(p.ID)
+
+	if err := w.deps.ProfileStore.Save(p); err != nil {
+		return false, err
+	}
+
+	w.discardPasswordForAuthMethod(previous, p)
+
+	return previous == nil, nil
+}
+
+// discardPasswordForAuthMethod deletes a profile's stored password once the
+// profile no longer authenticates with one: the entry is keyed by profile ID,
+// so it would stay unreachable from the UI (the Forget button is hidden for
+// certificate and SAML profiles) yet be reused if password auth returns.
+func (w *MainWindow) discardPasswordForAuthMethod(prev, p *profile.Profile) {
+	if p == nil || w.deps.KeyringStore == nil || p.AuthMethod.NeedsPassword() {
+		return
+	}
+
+	// Only a profile that used to need a password can have one stored, and a
+	// delete unlocks the login keyring, so never probe for the rest.
+	if prev == nil || !prev.AuthMethod.NeedsPassword() {
+		return
+	}
+
+	if err := w.deps.KeyringStore.Delete(p.ID); err != nil {
+		slog.Warn("Failed to discard password after auth method change",
+			"profile_id", p.ID, "error", err)
+		w.presentError("Error Removing Saved Password", err.Error())
+		return
+	}
+
+	slog.Info("Discarded saved password; the profile no longer uses one",
+		"profile_id", p.ID, "auth_method", p.AuthMethod)
 }
 
 // handleEvent reacts to parsed VPN output events (IP assignment, SAML auth).
@@ -684,11 +726,14 @@ func (w *MainWindow) connect() {
 		return
 	}
 
-	// Save any changes to the profile
-	if err := w.deps.ProfileStore.Save(currentProfile); err != nil {
+	// Connecting persists the editor's form values too, auth method included.
+	if _, err := w.saveProfile(currentProfile); err != nil {
 		w.showError("Error Saving Profile", err.Error())
 		return
 	}
+
+	w.profileList.UpdateProfile(currentProfile)
+	w.selectedProfile = currentProfile
 
 	// Notify that we're connecting to this profile (for auto-connect tracking)
 	if w.onProfileConnecting != nil {
