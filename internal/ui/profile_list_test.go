@@ -99,3 +99,19 @@ func TestProfileForDeletion_FallsBackToCaptured(t *testing.T) {
 		})
 	}
 }
+
+// TestGetProfileByID covers the lookup that a profile save consults for the
+// auth method as last saved, which decides whether a stored password is now
+// orphaned and must be dropped from the keyring.
+func TestGetProfileByID(t *testing.T) {
+	tracked := &profile.Profile{
+		ID:         "11111111-1111-1111-1111-111111111111",
+		AuthMethod: profile.AuthMethodPassword,
+	}
+	pl := &ProfileList{profileMap: map[string]*profileRow{tracked.ID: {profile: tracked}}}
+
+	assert.Same(t, tracked, pl.GetProfileByID(tracked.ID),
+		"must serve the tracked pointer, not a copy of it")
+	assert.Nil(t, pl.GetProfileByID("22222222-2222-2222-2222-222222222222"))
+	assert.Nil(t, (&ProfileList{}).GetProfileByID(tracked.ID), "a nil map must not panic")
+}

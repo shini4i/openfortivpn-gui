@@ -20,7 +20,7 @@
 - **Multiple Authentication Methods**: Username/Password, OTP, Client Certificate, SAML/SSO
 - **System Tray Integration** - Minimize to tray, quick connect/disconnect ([setup notes](#system-tray))
 - **Desktop Notifications** - Connection status notifications
-- **Secure Credential Storage** - Passwords stored in system keyring (libsecret); a password the gateway rejects is discarded so the next connection prompts for it again. On 2FA profiles, where a rejected one-time token is indistinguishable from a rejected password, the profile editor's **Forget** button clears the saved password instead
+- **Secure Credential Storage** - Passwords stored in system keyring (libsecret); a password the gateway rejects is discarded so the next connection prompts for it again. On 2FA profiles, where a rejected one-time token is indistinguishable from a rejected password, the profile editor's **Forget** button clears the saved password instead. Switching a profile to certificate or SAML authentication discards its saved password too
 - **Auto-Connect** - Optionally connect to last used profile on startup
 - **Auto Reconnect** - Automatically reconnect if the connection drops unexpectedly (configurable per profile)
 - **Configurable Routing** - DNS, routes, and split tunneling (half-internet routes)

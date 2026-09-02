@@ -415,3 +415,202 @@ func TestMainWindow_ForgetPassword_NilGuards(t *testing.T) {
 	assert.NotPanics(t, func() { (&MainWindow{}).onForgetPassword(nil) },
 		"a nil profile must return before the dialog is constructed")
 }
+
+// TestMainWindow_DiscardPasswordForAuthMethod asserts a stored password is
+// dropped when a profile stops using one: the entry is keyed by profile ID, so
+// it would otherwise be unreachable from the UI yet reused if the profile
+// switched back to password auth.
+func TestMainWindow_DiscardPasswordForAuthMethod(t *testing.T) {
+	const profileID = "3f8a1c6e-1d2b-4c9a-8e7f-0a1b2c3d4e5f"
+
+	newWindow := func(kr keyring.Store, shown *[]string) *MainWindow {
+		w := &MainWindow{deps: &MainWindowDeps{KeyringStore: kr}}
+		w.presentError = func(_, message string) { *shown = append(*shown, message) }
+		return w
+	}
+
+	cases := []struct {
+		name        string
+		prev        profile.AuthMethod
+		next        profile.AuthMethod
+		wantDeleted bool
+	}{
+		{"password to certificate", profile.AuthMethodPassword, profile.AuthMethodCertificate, true},
+		{"password to saml", profile.AuthMethodPassword, profile.AuthMethodSAML, true},
+		{"otp to saml", profile.AuthMethodOTP, profile.AuthMethodSAML, true},
+		{"password kept", profile.AuthMethodPassword, profile.AuthMethodPassword, false},
+		{"password to otp", profile.AuthMethodPassword, profile.AuthMethodOTP, false},
+		{"certificate to saml", profile.AuthMethodCertificate, profile.AuthMethodSAML, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kr := &fakeKeyring{password: "orphan"}
+			var shown []string
+			w := newWindow(kr, &shown)
+
+			w.discardPasswordForAuthMethod(
+				&profile.Profile{ID: profileID, AuthMethod: tc.prev},
+				&profile.Profile{ID: profileID, AuthMethod: tc.next},
+			)
+
+			if tc.wantDeleted {
+				assert.Equal(t, []string{profileID}, kr.deleted,
+					"a profile that no longer authenticates with a password must not keep one")
+			} else {
+				assert.Empty(t, kr.deleted,
+					"the keyring must not be touched when no password can be orphaned")
+			}
+			assert.Empty(t, shown)
+		})
+	}
+
+	t.Run("a failed delete is reported", func(t *testing.T) {
+		kr := &fakeKeyring{password: "orphan", delErr: errors.New("keyring locked")}
+		var shown []string
+		w := newWindow(kr, &shown)
+
+		w.discardPasswordForAuthMethod(
+			&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodPassword},
+			&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodSAML},
+		)
+
+		assert.Equal(t, []string{profileID}, kr.deleted)
+		assert.Equal(t, []string{"keyring locked"}, shown,
+			"the user must learn the password is still stored")
+	})
+
+	t.Run("a nil profile is a no-op", func(t *testing.T) {
+		kr := &fakeKeyring{password: "orphan"}
+		var shown []string
+		w := newWindow(kr, &shown)
+
+		assert.NotPanics(t, func() {
+			w.discardPasswordForAuthMethod(
+				&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodPassword}, nil)
+		})
+		assert.Empty(t, kr.deleted)
+		assert.Empty(t, shown)
+	})
+
+	// A profile the list does not track yet is new, so it can have no password.
+	t.Run("an untracked profile is a no-op", func(t *testing.T) {
+		kr := &fakeKeyring{password: "orphan"}
+		var shown []string
+		w := newWindow(kr, &shown)
+
+		assert.NotPanics(t, func() {
+			w.discardPasswordForAuthMethod(nil,
+				&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodSAML})
+		})
+		assert.Empty(t, kr.deleted)
+		assert.Empty(t, shown)
+	})
+
+	// Tray-only paths build a window with partial deps.
+	t.Run("a missing keyring store is a no-op", func(t *testing.T) {
+		var shown []string
+		w := newWindow(nil, &shown)
+
+		assert.NotPanics(t, func() {
+			w.discardPasswordForAuthMethod(
+				&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodPassword},
+				&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodSAML},
+			)
+		})
+		assert.Empty(t, shown)
+	})
+}
+
+// fakeProfileStore records saves. Only Save is exercised by saveProfile; the
+// rest of profile.StoreInterface is present to satisfy it.
+type fakeProfileStore struct {
+	saved   []string
+	saveErr error
+}
+
+func (f *fakeProfileStore) Load(string) (*profile.Profile, error) { return nil, nil }
+func (f *fakeProfileStore) List() (*profile.ListResult, error)    { return nil, nil }
+func (f *fakeProfileStore) Exists(string) (bool, error)           { return false, nil }
+func (f *fakeProfileStore) Delete(string) error                   { return nil }
+
+func (f *fakeProfileStore) Save(p *profile.Profile) error {
+	if f.saveErr != nil {
+		return f.saveErr
+	}
+	f.saved = append(f.saved, p.ID)
+	return nil
+}
+
+// TestMainWindow_SaveProfile covers the sequence both persistence paths share:
+// the store write, the orphaned-password cleanup that depends on the auth
+// method as last saved, and the report of whether the profile is new.
+func TestMainWindow_SaveProfile(t *testing.T) {
+	const profileID = "3f8a1c6e-1d2b-4c9a-8e7f-0a1b2c3d4e5f"
+
+	newWindow := func(store profile.StoreInterface, kr keyring.Store, tracked *profile.Profile) *MainWindow {
+		w := &MainWindow{
+			deps:        &MainWindowDeps{ProfileStore: store, KeyringStore: kr},
+			profileList: &ProfileList{profileMap: map[string]*profileRow{}},
+		}
+		if tracked != nil {
+			w.profileList.profileMap[tracked.ID] = &profileRow{profile: tracked}
+		}
+		w.presentError = func(string, string) {}
+		return w
+	}
+
+	t.Run("switching a tracked profile away from password auth", func(t *testing.T) {
+		store := &fakeProfileStore{}
+		kr := &fakeKeyring{password: "orphan"}
+		w := newWindow(store, kr, &profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodPassword})
+
+		isNew, err := w.saveProfile(&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodSAML})
+
+		assert.NoError(t, err)
+		assert.False(t, isNew, "the list already tracks this profile")
+		assert.Equal(t, []string{profileID}, store.saved)
+		assert.Equal(t, []string{profileID}, kr.deleted,
+			"the password the profile no longer uses must not survive the save")
+	})
+
+	t.Run("a profile that never used password auth", func(t *testing.T) {
+		store := &fakeProfileStore{}
+		kr := &fakeKeyring{}
+		w := newWindow(store, kr, &profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodSAML})
+
+		isNew, err := w.saveProfile(&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodSAML})
+
+		assert.NoError(t, err)
+		assert.False(t, isNew)
+		assert.Equal(t, []string{profileID}, store.saved)
+		assert.Empty(t, kr.deleted,
+			"nothing can be orphaned, so the save must not unlock the keyring")
+	})
+
+	t.Run("a profile the list does not track is new", func(t *testing.T) {
+		store := &fakeProfileStore{}
+		kr := &fakeKeyring{}
+		w := newWindow(store, kr, nil)
+
+		isNew, err := w.saveProfile(&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodSAML})
+
+		assert.NoError(t, err)
+		assert.True(t, isNew)
+		assert.Equal(t, []string{profileID}, store.saved)
+		assert.Empty(t, kr.deleted, "a new profile cannot have a stored password")
+	})
+
+	t.Run("a failed save keeps the password", func(t *testing.T) {
+		store := &fakeProfileStore{saveErr: errors.New("disk full")}
+		kr := &fakeKeyring{password: "still needed"}
+		w := newWindow(store, kr, &profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodPassword})
+
+		isNew, err := w.saveProfile(&profile.Profile{ID: profileID, AuthMethod: profile.AuthMethodSAML})
+
+		assert.EqualError(t, err, "disk full")
+		assert.False(t, isNew)
+		assert.Empty(t, kr.deleted,
+			"the profile is still a password profile on disk, so it still needs its password")
+	})
+}
