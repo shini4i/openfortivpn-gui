@@ -130,6 +130,7 @@ func TestValidTransitions(t *testing.T) {
 		// From Connected
 		{StateConnected, StateDisconnected},
 		{StateConnected, StateReconnecting},
+		{StateConnected, StateFailed},
 
 		// From Reconnecting
 		{StateReconnecting, StateConnecting},

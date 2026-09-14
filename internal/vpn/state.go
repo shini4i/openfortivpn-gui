@@ -15,7 +15,8 @@ const (
 	StateConnected ConnectionState = "connected"
 	// StateReconnecting indicates the VPN is attempting to reconnect after a drop.
 	StateReconnecting ConnectionState = "reconnecting"
-	// StateFailed indicates the connection attempt failed.
+	// StateFailed indicates the connection attempt failed, or that a live
+	// tunnel died in a way auto-reconnect cannot recover from.
 	StateFailed ConnectionState = "failed"
 )
 
@@ -60,6 +61,7 @@ var validTransitions = map[ConnectionState][]ConnectionState{
 	StateConnected: {
 		StateDisconnected,
 		StateReconnecting,
+		StateFailed, // The tunnel died in a way that auto-reconnect cannot fix
 	},
 	StateReconnecting: {
 		StateConnecting,

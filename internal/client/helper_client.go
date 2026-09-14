@@ -30,6 +30,11 @@ const (
 // ErrHelperNotAvailable is returned when the helper daemon is not running.
 var ErrHelperNotAvailable = errors.New("helper daemon not available")
 
+// ErrHelperConnectionLost is reported when the helper daemon's socket closes
+// without the GUI asking for it. The client cannot recover: helper mode is
+// chosen once at startup and the tunnel's real state is no longer observable.
+var ErrHelperConnectionLost = errors.New("helper daemon connection lost")
+
 // HelperClient implements vpn.VPNController by communicating with the helper daemon.
 type HelperClient struct {
 	socketPath string
@@ -333,10 +338,51 @@ func (c *HelperClient) readLoop() {
 			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
 				slog.Error("Read error from helper", "error", err)
 			}
+			c.reportHelperLost()
 			return
 		}
 
 		c.handleMessage(line)
+	}
+}
+
+// reportHelperLost tears the client down after the helper's socket closed on
+// its own. The daemon sends no disconnect event when it dies, so without this
+// the GUI keeps showing the last known state for a tunnel that is gone. A
+// shutdown the GUI asked for is not reported.
+func (c *HelperClient) reportHelperLost() {
+	select {
+	case <-c.closeChan:
+		return
+	default:
+	}
+
+	c.mu.Lock()
+	oldState := c.state
+	// Failed, not Disconnected: the latter arms auto-reconnect, which would
+	// dial through a socket that is already gone and never reach a terminal
+	// state, leaving the GUI stuck on "Reconnecting".
+	c.state = vpn.StateFailed
+	c.assignedIP = ""
+	c.interfaceName = ""
+	onStateChange := c.onStateChange
+	onError := c.onError
+	c.mu.Unlock()
+
+	slog.Error("Helper daemon connection lost", "socket", c.socketPath, "state", oldState)
+
+	// Unblocks any in-flight request instead of leaving it to time out.
+	if err := c.Close(); err != nil {
+		slog.Warn("Failed to close client after losing the helper", "error", err)
+	}
+
+	// Nothing was up, so nothing failed: a helper that dies while the GUI is
+	// idle is reported through onError alone.
+	if onStateChange != nil && oldState != vpn.StateFailed && oldState != vpn.StateDisconnected {
+		onStateChange(oldState, vpn.StateFailed)
+	}
+	if onError != nil {
+		onError(ErrHelperConnectionLost)
 	}
 }
 
@@ -412,11 +458,15 @@ func (c *HelperClient) handleEvent(event *protocol.Event) {
 			slog.Warn("Invalid state change event", "error", err)
 			return
 		}
+		newState := vpn.ConnectionState(data.To)
+
 		c.mu.Lock()
 		oldState := c.state
-		c.state = vpn.ConnectionState(data.To)
-		// Clear interface and IP on disconnect.
-		if vpn.ConnectionState(data.To) == vpn.StateDisconnected {
+		c.state = newState
+		// No tunnel, no addressing: the interface.go contract says both read
+		// empty unless connected, and a failed tunnel is just as gone as a
+		// disconnected one.
+		if newState == vpn.StateDisconnected || newState == vpn.StateFailed {
 			c.assignedIP = ""
 			c.interfaceName = ""
 		}
@@ -424,7 +474,7 @@ func (c *HelperClient) handleEvent(event *protocol.Event) {
 		c.mu.Unlock()
 
 		if callback != nil {
-			callback(oldState, vpn.ConnectionState(data.To))
+			callback(oldState, newState)
 		}
 
 	case protocol.EventOutput:
