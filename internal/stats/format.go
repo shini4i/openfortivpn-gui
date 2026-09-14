@@ -13,34 +13,41 @@ const (
 	tib = gib * 1024
 )
 
+// binaryUnit returns the largest binary unit that value reaches, as its divisor
+// and suffix. Values below 1 KiB get a divisor of 1.
+func binaryUnit(value float64) (float64, string) {
+	switch {
+	case value >= tib:
+		return tib, "TiB"
+	case value >= gib:
+		return gib, "GiB"
+	case value >= mib:
+		return mib, "MiB"
+	case value >= kib:
+		return kib, "KiB"
+	default:
+		return 1, "B"
+	}
+}
+
 // FormatBytes formats a byte count using binary units (KiB, MiB, GiB, TiB).
 func FormatBytes(bytes uint64) string {
-	switch {
-	case bytes >= tib:
-		return fmt.Sprintf("%.1f TiB", float64(bytes)/float64(tib))
-	case bytes >= gib:
-		return fmt.Sprintf("%.1f GiB", float64(bytes)/float64(gib))
-	case bytes >= mib:
-		return fmt.Sprintf("%.1f MiB", float64(bytes)/float64(mib))
-	case bytes >= kib:
-		return fmt.Sprintf("%.1f KiB", float64(bytes)/float64(kib))
-	default:
+	if bytes < kib {
 		return fmt.Sprintf("%d B", bytes)
 	}
+
+	divisor, unit := binaryUnit(float64(bytes))
+	return fmt.Sprintf("%.1f %s", float64(bytes)/divisor, unit)
 }
 
 // FormatRate formats a bytes-per-second rate using binary units.
 func FormatRate(bytesPerSec float64) string {
-	switch {
-	case bytesPerSec >= float64(gib):
-		return fmt.Sprintf("%.1f GiB/s", bytesPerSec/float64(gib))
-	case bytesPerSec >= float64(mib):
-		return fmt.Sprintf("%.1f MiB/s", bytesPerSec/float64(mib))
-	case bytesPerSec >= float64(kib):
-		return fmt.Sprintf("%.1f KiB/s", bytesPerSec/float64(kib))
-	default:
+	if bytesPerSec < kib {
 		return fmt.Sprintf("%.0f B/s", bytesPerSec)
 	}
+
+	divisor, unit := binaryUnit(bytesPerSec)
+	return fmt.Sprintf("%.1f %s/s", bytesPerSec/divisor, unit)
 }
 
 // FormatDuration formats a duration in a human-readable format.

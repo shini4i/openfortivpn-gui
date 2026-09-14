@@ -1780,3 +1780,41 @@ func TestController_BeginAttempt_WaitsForInFlightDispatch(t *testing.T) {
 		"an in-flight callback must not see the retry announced, or it would pass for it")
 	assert.Equal(t, 2, announced)
 }
+
+func TestController_StoreInterfaceIfCurrent(t *testing.T) {
+	newConnected := func() *Controller {
+		c := NewController("/usr/bin/openfortivpn")
+		c.state = StateConnected
+		c.assignedIP = "10.0.0.2"
+		return c
+	}
+
+	t.Run("stores the interface for the current attempt", func(t *testing.T) {
+		c := newConnected()
+
+		assert.True(t, c.storeInterfaceIfCurrent(c.attempt, "10.0.0.2", "ppp0"))
+		assert.Equal(t, "ppp0", c.GetInterface())
+	})
+
+	t.Run("rejects a superseded attempt", func(t *testing.T) {
+		c := newConnected()
+
+		assert.False(t, c.storeInterfaceIfCurrent(c.attempt+1, "10.0.0.2", "ppp0"))
+		assert.Empty(t, c.GetInterface())
+	})
+
+	t.Run("rejects an interface for a stale address", func(t *testing.T) {
+		c := newConnected()
+
+		assert.False(t, c.storeInterfaceIfCurrent(c.attempt, "10.0.0.9", "ppp0"))
+		assert.Empty(t, c.GetInterface())
+	})
+
+	t.Run("rejects an interface once disconnected", func(t *testing.T) {
+		c := newConnected()
+		c.state = StateDisconnected
+
+		assert.False(t, c.storeInterfaceIfCurrent(c.attempt, "10.0.0.2", "ppp0"))
+		assert.Empty(t, c.GetInterface())
+	})
+}

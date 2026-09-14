@@ -258,29 +258,26 @@ func (c *Controller) GetInterface() string {
 	return c.interfaceName
 }
 
-// detectInterface attempts to detect the VPN interface by the assigned IP.
-// It uses DetectInterfaceWithRetry for retry logic, then verifies the attempt is
-// still current and the connection state still valid before setting the name.
+// detectInterface detects the VPN interface carrying assignedIP and records it
+// for the given connection attempt.
 func (c *Controller) detectInterface(attempt uint64, assignedIP string) {
-	ifaceName, err := DetectInterfaceWithRetry(assignedIP, 5, 100*time.Millisecond, nil)
-	if err != nil {
-		slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP)
-		return
-	}
+	DetectInterfaceForIP(assignedIP, func(iface string) bool {
+		return c.storeInterfaceIfCurrent(attempt, assignedIP, iface)
+	})
+}
 
-	// Verify state before setting interface to avoid race with newer connections.
+// storeInterfaceIfCurrent records iface as the tunnel interface unless the
+// connection has moved on — a newer attempt, a different address, or a
+// disconnect. Reports whether it stored the name.
+func (c *Controller) storeInterfaceIfCurrent(attempt uint64, assignedIP, iface string) bool {
 	c.mu.Lock()
-	currentIP := c.assignedIP
-	currentState := c.state
-	if c.attempt == attempt && currentIP == assignedIP && currentState != StateDisconnected {
-		c.interfaceName = ifaceName
-		c.mu.Unlock()
-		slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
-	} else {
-		c.mu.Unlock()
-		slog.Debug("Skipping interface update: state changed during detection",
-			"expectedIP", assignedIP, "currentIP", currentIP, "state", currentState)
+	defer c.mu.Unlock()
+
+	if c.attempt != attempt || c.assignedIP != assignedIP || c.state == StateDisconnected {
+		return false
 	}
+	c.interfaceName = iface
+	return true
 }
 
 // emitOutput sends a raw output line to the registered callback.

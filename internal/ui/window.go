@@ -81,7 +81,7 @@ type MainWindow struct {
 	// without a running GTK main loop.
 	scheduleOnMain func(func())
 
-	// presentError shows an error dialog. It defaults to showError and is
+	// presentError shows an error dialog. It defaults to showErrorDialog and is
 	// injectable so tests can drive handlers that report failures without
 	// constructing GTK widgets.
 	presentError func(title, message string)
@@ -97,7 +97,7 @@ func NewMainWindow(app *adw.Application, deps *MainWindowDeps) *MainWindow {
 		deps:           deps,
 		scheduleOnMain: func(fn func()) { glib.IdleAdd(fn) },
 	}
-	w.presentError = w.showError
+	w.presentError = w.showErrorDialog
 	w.presentToast = w.showToast
 
 	w.setupWindow(app)
@@ -397,8 +397,8 @@ func (w *MainWindow) handleStateChange(oldState, newState vpn.ConnectionState) {
 // handleError reports a VPN error to the user.
 //
 // Errors are emitted on the controller's output-processing goroutine.
-// showError constructs and presents a GTK dialog, which is not thread-safe, so
-// the work is marshaled onto the main thread via scheduleOnMain.
+// presentError constructs and presents a GTK dialog, which is not thread-safe,
+// so the work is marshaled onto the main thread via scheduleOnMain.
 func (w *MainWindow) handleError(err error) {
 	connection := w.connection.current()
 	w.scheduleOnMain(func() {
@@ -407,7 +407,7 @@ func (w *MainWindow) handleError(err error) {
 			return
 		}
 		w.discardRejectedPassword(err)
-		w.presentError("VPN Error", err.Error())
+		w.showError("VPN Error", err.Error())
 	})
 }
 
@@ -495,7 +495,7 @@ func (w *MainWindow) discardPasswordForAuthMethod(prev, p *profile.Profile) {
 	if err := w.deps.KeyringStore.Delete(p.ID); err != nil {
 		slog.Warn("Failed to discard password after auth method change",
 			"profile_id", p.ID, "error", err)
-		w.presentError("Error Removing Saved Password", err.Error())
+		w.showError("Error Removing Saved Password", err.Error())
 		return
 	}
 
@@ -602,18 +602,28 @@ func (w *MainWindow) onAddProfile() {
 
 // onDeleteProfile handles profile deletion.
 func (w *MainWindow) onDeleteProfile(p *profile.Profile) {
-	// Show confirmation dialog
-	dialog := adw.NewAlertDialog("Delete Profile?", "")
-	dialog.SetBody("Are you sure you want to delete the profile \"" + p.Name + "\"? This action cannot be undone.")
+	w.confirmDestructive(
+		"Delete Profile?",
+		"Are you sure you want to delete the profile \""+p.Name+"\"? This action cannot be undone.",
+		"delete", "Delete",
+		func() { w.performDeleteProfile(p) },
+	)
+}
+
+// confirmDestructive presents a cancel-by-default confirmation dialog and runs
+// onConfirm only when the user picks the destructive response.
+func (w *MainWindow) confirmDestructive(heading, body, responseID, responseLabel string, onConfirm func()) {
+	dialog := adw.NewAlertDialog(heading, "")
+	dialog.SetBody(body)
 	dialog.AddResponse("cancel", "Cancel")
-	dialog.AddResponse("delete", "Delete")
-	dialog.SetResponseAppearance("delete", adw.ResponseDestructive)
+	dialog.AddResponse(responseID, responseLabel)
+	dialog.SetResponseAppearance(responseID, adw.ResponseDestructive)
 	dialog.SetDefaultResponse("cancel")
 	dialog.SetCloseResponse("cancel")
 
 	dialog.ConnectResponse(func(response string) {
-		if response == "delete" {
-			w.performDeleteProfile(p)
+		if response == responseID {
+			onConfirm()
 		}
 	})
 
@@ -655,22 +665,13 @@ func (w *MainWindow) onForgetPassword(p *profile.Profile) {
 		return
 	}
 
-	dialog := adw.NewAlertDialog("Forget Saved Password?", "")
-	dialog.SetBody("The password stored for \"" + p.Name + "\" will be removed from the system keyring. " +
-		"You will be asked for it the next time you connect.")
-	dialog.AddResponse("cancel", "Cancel")
-	dialog.AddResponse("forget", "Forget")
-	dialog.SetResponseAppearance("forget", adw.ResponseDestructive)
-	dialog.SetDefaultResponse("cancel")
-	dialog.SetCloseResponse("cancel")
-
-	dialog.ConnectResponse(func(response string) {
-		if response == "forget" {
-			w.forgetSavedPassword(p)
-		}
-	})
-
-	dialog.Present(w.window)
+	w.confirmDestructive(
+		"Forget Saved Password?",
+		"The password stored for \""+p.Name+"\" will be removed from the system keyring. "+
+			"You will be asked for it the next time you connect.",
+		"forget", "Forget",
+		func() { w.forgetSavedPassword(p) },
+	)
 }
 
 // forgetSavedPassword removes the profile's password from the keyring so the
@@ -684,7 +685,7 @@ func (w *MainWindow) forgetSavedPassword(p *profile.Profile) {
 
 	if err := w.deps.KeyringStore.Delete(p.ID); err != nil {
 		slog.Warn("Failed to forget saved password", "profile_id", p.ID, "error", err)
-		w.presentError("Error Forgetting Password", err.Error())
+		w.showError("Error Forgetting Password", err.Error())
 		return
 	}
 
@@ -917,8 +918,14 @@ func (w *MainWindow) updateConnectButton(state vpn.ConnectionState) {
 	}
 }
 
-// showError displays an error dialog.
+// showError reports a failure to the user. Every error path goes through here,
+// so the presentError seam captures all of them.
 func (w *MainWindow) showError(title, message string) {
+	w.presentError(title, message)
+}
+
+// showErrorDialog presents a modal error dialog with a single OK response.
+func (w *MainWindow) showErrorDialog(title, message string) {
 	dialog := adw.NewAlertDialog(title, message)
 	dialog.AddResponse("ok", "OK")
 	dialog.SetDefaultResponse("ok")

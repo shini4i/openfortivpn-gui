@@ -133,3 +133,32 @@ func TestHelperClient_Connect_ForwardsPasswordAndOTP(t *testing.T) {
 		t.Fatal("daemon did not receive a connect request")
 	}
 }
+
+func TestHelperClient_StoreInterfaceIfCurrent(t *testing.T) {
+	newConnected := func() *HelperClient {
+		c := &HelperClient{state: vpn.StateConnected, assignedIP: "10.0.0.2"}
+		return c
+	}
+
+	t.Run("stores the interface for the current address", func(t *testing.T) {
+		c := newConnected()
+
+		assert.True(t, c.storeInterfaceIfCurrent("10.0.0.2", "ppp0"))
+		assert.Equal(t, "ppp0", c.GetInterface())
+	})
+
+	t.Run("rejects an interface for a stale address", func(t *testing.T) {
+		c := newConnected()
+
+		assert.False(t, c.storeInterfaceIfCurrent("10.0.0.9", "ppp0"))
+		assert.Empty(t, c.GetInterface())
+	})
+
+	t.Run("rejects an interface once disconnected", func(t *testing.T) {
+		c := newConnected()
+		c.state = vpn.StateDisconnected
+
+		assert.False(t, c.storeInterfaceIfCurrent("10.0.0.2", "ppp0"))
+		assert.Empty(t, c.GetInterface())
+	})
+}

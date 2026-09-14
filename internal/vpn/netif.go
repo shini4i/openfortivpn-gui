@@ -2,6 +2,7 @@ package vpn
 
 import (
 	"errors"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -102,4 +103,33 @@ func DetectInterfaceWithRetry(assignedIP string, maxRetries int, initialBackoff 
 		return "", lastErr
 	}
 	return "", ErrInterfaceNotFound
+}
+
+// interfaceLookup resolves the interface carrying an IP, with retries.
+type interfaceLookup func(assignedIP string, maxRetries int, initialBackoff time.Duration, sleepFunc func(time.Duration)) (string, error)
+
+// DetectInterfaceForIP resolves the tunnel interface carrying assignedIP and
+// hands it to apply, which stores the name only while it still belongs to the
+// live connection and reports whether it did. Blocks for the retry backoff, so
+// callers run it on their own goroutine.
+func DetectInterfaceForIP(assignedIP string, apply func(iface string) bool) {
+	detectInterfaceForIP(assignedIP, DetectInterfaceWithRetry, apply)
+}
+
+// detectInterfaceForIP is DetectInterfaceForIP with the lookup supplied, so
+// tests can drive both outcomes without a real tunnel device.
+func detectInterfaceForIP(assignedIP string, lookup interfaceLookup, apply func(iface string) bool) {
+	ifaceName, err := lookup(assignedIP, 5, 100*time.Millisecond, nil)
+	if err != nil {
+		slog.Warn("Failed to detect VPN interface after retries", "ip", assignedIP, "error", err)
+		return
+	}
+
+	if !apply(ifaceName) {
+		slog.Debug("Skipping interface update: connection moved on during detection",
+			"ip", assignedIP, "interface", ifaceName)
+		return
+	}
+
+	slog.Info("Detected VPN interface", "interface", ifaceName, "ip", assignedIP)
 }

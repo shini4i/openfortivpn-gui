@@ -130,3 +130,38 @@ func TestDetectInterfaceWithRetry_EmptyIP(t *testing.T) {
 	_, err := DetectInterfaceWithRetry("", 1, 10*time.Millisecond, noopSleep)
 	assert.Equal(t, ErrInterfaceNotFound, err)
 }
+
+func TestDetectInterfaceForIP(t *testing.T) {
+	found := func(string, int, time.Duration, func(time.Duration)) (string, error) {
+		return "ppp0", nil
+	}
+	notFound := func(string, int, time.Duration, func(time.Duration)) (string, error) {
+		return "", ErrInterfaceNotFound
+	}
+
+	t.Run("hands the detected interface to apply", func(t *testing.T) {
+		var got string
+		detectInterfaceForIP("10.0.0.2", found, func(iface string) bool {
+			got = iface
+			return true
+		})
+
+		assert.Equal(t, "ppp0", got)
+	})
+
+	t.Run("does not call apply when detection fails", func(t *testing.T) {
+		called := false
+		detectInterfaceForIP("10.0.0.2", notFound, func(string) bool {
+			called = true
+			return true
+		})
+
+		assert.False(t, called)
+	})
+
+	t.Run("tolerates apply rejecting the interface", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			detectInterfaceForIP("10.0.0.2", found, func(string) bool { return false })
+		})
+	})
+}

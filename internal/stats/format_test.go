@@ -47,6 +47,7 @@ func TestFormatRate(t *testing.T) {
 		{"1.5 KiB/s", 1536, "1.5 KiB/s"},
 		{"exactly 1 MiB/s", 1024 * 1024, "1.0 MiB/s"},
 		{"exactly 1 GiB/s", 1024 * 1024 * 1024, "1.0 GiB/s"},
+		{"exactly 1 TiB/s", 1024 * 1024 * 1024 * 1024, "1.0 TiB/s"},
 		{"fractional value", 512.5, "512 B/s"},
 	}
 

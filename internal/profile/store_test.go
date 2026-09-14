@@ -264,6 +264,31 @@ func TestStore_List_WithCorruptedProfile(t *testing.T) {
 	assert.Contains(t, result.Errors[0].Err.Error(), "failed to load profile")
 }
 
+// TestStore_List_WithUnreadableProfile pins the missing-file mapping that List
+// shares with Load: an entry that vanishes between the directory scan and the
+// read is reported as ErrStoreNotFound, not a raw path error.
+func TestStore_List_WithUnreadableProfile(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	p := validTestProfile()
+	require.NoError(t, store.Save(p))
+
+	// A dangling symlink survives the ReadDir listing but fails the read, which
+	// is the same outcome as a profile deleted between the two steps.
+	danglingID := "660e8400-e29b-41d4-a716-446655440002"
+	danglingPath := filepath.Join(store.baseDir, danglingID+".json")
+	require.NoError(t, os.Symlink(filepath.Join(store.baseDir, "gone.json"), danglingPath))
+
+	result, err := store.List()
+
+	require.NoError(t, err)
+	assert.Len(t, result.Profiles, 1)
+	require.Len(t, result.Errors, 1)
+	assert.Equal(t, danglingID, result.Errors[0].ProfileID)
+	assert.ErrorIs(t, result.Errors[0], ErrStoreNotFound)
+}
+
 func TestStore_List_WithInvalidUUIDFilename(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

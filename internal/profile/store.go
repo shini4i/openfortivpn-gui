@@ -109,7 +109,14 @@ func (s *Store) Load(id string) (*Profile, error) {
 		return nil, err
 	}
 
-	// #nosec G304 -- path is constructed from UUID-validated id via profilePath()
+	return readProfile(path)
+}
+
+// readProfile reads and decodes the profile file at path. The caller is
+// responsible for validating the ID the path was built from. Returns
+// ErrStoreNotFound when the file is missing.
+func readProfile(path string) (*Profile, error) {
+	// #nosec G304 -- path is constructed from a UUID-validated id within baseDir
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -195,7 +202,7 @@ func (s *Store) List() (*ListResult, error) {
 			continue
 		}
 
-		p, err := s.loadUnsafe(id)
+		p, err := readProfile(filepath.Join(s.baseDir, entry.Name()))
 		if err != nil {
 			result.Errors = append(result.Errors, ListError{
 				ProfileID: id,
@@ -207,23 +214,6 @@ func (s *Store) List() (*ListResult, error) {
 	}
 
 	return result, nil
-}
-
-// loadUnsafe loads a profile without acquiring locks (caller must hold lock).
-func (s *Store) loadUnsafe(id string) (*Profile, error) {
-	path := filepath.Join(s.baseDir, id+".json") // ID already validated by caller
-	// #nosec G304 -- path uses UUID-validated id within baseDir
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var p Profile
-	if err := json.Unmarshal(data, &p); err != nil {
-		return nil, err
-	}
-
-	return &p, nil
 }
 
 // Exists checks if a profile with the given ID exists.
