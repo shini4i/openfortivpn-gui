@@ -109,12 +109,12 @@ func (p *MockProcess) SetKillError(err error) {
 
 // WriteToStdout writes data to stdout for the controller to read.
 func (p *MockProcess) WriteToStdout(data string) {
-	p.stdout.buf.WriteString(data + "\n")
+	p.stdout.writeLine(data)
 }
 
 // WriteToStderr writes data to stderr for the controller to read.
 func (p *MockProcess) WriteToStderr(data string) {
-	p.stderr.buf.WriteString(data + "\n")
+	p.stderr.writeLine(data)
 }
 
 // GetStdinContent returns what was written to stdin.
@@ -176,6 +176,14 @@ type mockReadCloser struct {
 	buf    *bytes.Buffer
 	closed bool
 	mu     sync.Mutex
+}
+
+// writeLine appends a line for the reader to pick up. It takes the same lock as
+// Read, which the scanner goroutine calls concurrently.
+func (r *mockReadCloser) writeLine(data string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.buf.WriteString(data + "\n")
 }
 
 func (r *mockReadCloser) Read(p []byte) (n int, err error) {

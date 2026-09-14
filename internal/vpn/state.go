@@ -30,6 +30,12 @@ func (s ConnectionState) IsTransitioning() bool {
 	return s == StateAuthenticating || s == StateConnecting || s == StateReconnecting
 }
 
+// IsTerminal returns true if the state represents a connection that is over,
+// whether it ended cleanly or failed. Such a state carries no addressing.
+func (s ConnectionState) IsTerminal() bool {
+	return s == StateDisconnected || s == StateFailed
+}
+
 // CanConnect returns true if a new connection can be initiated from this state.
 func (s ConnectionState) CanConnect() bool {
 	return s == StateDisconnected || s == StateFailed

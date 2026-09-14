@@ -209,13 +209,15 @@ func TestHelperClient_StoreInterfaceIfCurrent(t *testing.T) {
 		assert.Empty(t, c.GetInterface())
 	})
 
-	t.Run("rejects an interface once disconnected", func(t *testing.T) {
-		c := newConnected()
-		c.state = vpn.StateDisconnected
+	for _, terminal := range []vpn.ConnectionState{vpn.StateDisconnected, vpn.StateFailed} {
+		t.Run("rejects an interface once "+string(terminal), func(t *testing.T) {
+			c := newConnected()
+			c.state = terminal
 
-		assert.False(t, c.storeInterfaceIfCurrent("10.0.0.2", "ppp0"))
-		assert.Empty(t, c.GetInterface())
-	})
+			assert.False(t, c.storeInterfaceIfCurrent("10.0.0.2", "ppp0"))
+			assert.Empty(t, c.GetInterface())
+		})
+	}
 }
 
 // stateChangeEvent builds the daemon's state-change event for handleEvent.
@@ -383,4 +385,71 @@ func TestHelperClient_Close_ReportsNothing(t *testing.T) {
 
 	assert.Equal(t, vpn.StateConnected, client.GetState(),
 		"a deliberate close must not mark the tunnel failed")
+}
+
+// TestHelperClient_HandleEvent_RefusesAddressForEndedTunnel covers the daemon's
+// events arriving out of order: a got_ip raised before the tunnel failed can be
+// delivered after it, and must not resurrect the dead tunnel's addressing.
+func TestHelperClient_HandleEvent_RefusesAddressForEndedTunnel(t *testing.T) {
+	for _, terminal := range []vpn.ConnectionState{vpn.StateDisconnected, vpn.StateFailed} {
+		t.Run(string(terminal), func(t *testing.T) {
+			c := &HelperClient{state: terminal}
+
+			c.handleEvent(gotIPEvent(t, "10.0.0.2"))
+
+			assert.Empty(t, c.GetAssignedIP(), "an ended tunnel must not regain an address")
+		})
+	}
+}
+
+// gotIPEvent builds the daemon's got_ip event for handleEvent.
+func gotIPEvent(t *testing.T, ip string) *protocol.Event {
+	t.Helper()
+
+	data, err := json.Marshal(protocol.VPNEventData{
+		EventType: string(vpn.EventGotIP),
+		Data:      map[string]string{"ip": ip},
+	})
+	require.NoError(t, err)
+	return &protocol.Event{
+		Type: protocol.MessageTypeEvent,
+		Name: protocol.EventVPN,
+		Data: data,
+	}
+}
+
+// TestHelperClient_SyncState_IgnoresAddressForEndedTunnel covers a daemon of a
+// different build reporting an address alongside a terminal state — a package
+// upgrade that replaces the binary without restarting the unit.
+func TestHelperClient_SyncState_IgnoresAddressForEndedTunnel(t *testing.T) {
+	daemon := startFakeDaemon(t, vpn.StateFailed, "10.0.0.2")
+
+	client, err := NewHelperClientWithPath(daemon.path)
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+
+	assert.Equal(t, vpn.StateFailed, client.GetState())
+	assert.Empty(t, client.GetAssignedIP(), "a terminal state carries no address, whatever the daemon says")
+	assert.Empty(t, client.GetInterface())
+
+	// The clear must not depend on the client being freshly built.
+	client.mu.Lock()
+	client.assignedIP = "10.0.0.9"
+	client.interfaceName = "ppp0"
+	client.mu.Unlock()
+
+	require.NoError(t, client.syncState())
+	assert.Empty(t, client.GetAssignedIP(), "a re-handshake must drop addressing the daemon no longer backs")
+	assert.Empty(t, client.GetInterface())
+}
+
+// TestHelperClient_HandleEvent_RecordsAddressForLiveTunnel is the positive half
+// of the same gate: a live tunnel must still record the address the daemon
+// reports, or helper mode shows none at all.
+func TestHelperClient_HandleEvent_RecordsAddressForLiveTunnel(t *testing.T) {
+	c := &HelperClient{state: vpn.StateConnected}
+
+	c.handleEvent(gotIPEvent(t, "10.0.0.2"))
+
+	assert.Equal(t, "10.0.0.2", c.GetAssignedIP())
 }
