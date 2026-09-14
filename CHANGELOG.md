@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The window and tray no longer keep reporting an active tunnel after the
+  privileged helper daemon stops. Losing the helper now marks the connection
+  failed and tells you what happened, instead of leaving a dead tunnel showing
+  as connected until the application is restarted. A request already in flight
+  when the helper stops fails immediately rather than waiting out its timeout.
+
 ## [0.4.1] - 2026-09-02
 
 ### Fixed
