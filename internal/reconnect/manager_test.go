@@ -102,10 +102,21 @@ func TestManager_ShouldReconnect_WrongStateTransition(t *testing.T) {
 		AutoReconnect: true,
 	}
 
-	// Not from Connected state
+	// No attempt is in flight, so a transition out of Connecting belongs to a
+	// connection the user started.
 	assert.False(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateDisconnected))
+}
 
-	// Not to Disconnected state
+// TestManager_ShouldReconnect_FailedTunnelIsNotRetried holds a product
+// decision, not a state-machine detail: a live tunnel ending in Failed means
+// the helper daemon died, which reconnecting cannot recover — dialling again
+// would only strand the GUI on "Reconnecting".
+func TestManager_ShouldReconnect_FailedTunnelIsNotRetried(t *testing.T) {
+	m := NewManager(DefaultConfig(), nil)
+	m.lastConnectedProfile = &profile.Profile{
+		AutoReconnect: true,
+	}
+
 	assert.False(t, m.ShouldReconnect(vpn.StateConnected, vpn.StateFailed))
 }
 
@@ -154,6 +165,10 @@ func TestManager_ShouldReconnect_OTPAuth(t *testing.T) {
 	assert.False(t, result)
 }
 
+// TestManager_ShouldReconnect_MaxAttemptsReached covers the limit check on the
+// tunnel-drop entry. The count is set directly because no attempt is running on
+// this path; the limit reached through a live sequence is covered by
+// TestManager_ShouldReconnect_EndsSequenceAtLimit.
 func TestManager_ShouldReconnect_MaxAttemptsReached(t *testing.T) {
 	cfg := Config{MaxAttempts: 3, DelaySeconds: 1}
 	m := NewManager(cfg, nil)
@@ -166,6 +181,7 @@ func TestManager_ShouldReconnect_MaxAttemptsReached(t *testing.T) {
 	result := m.ShouldReconnect(vpn.StateConnected, vpn.StateDisconnected)
 
 	assert.False(t, result)
+	assert.Zero(t, m.GetAttemptCount(), "reaching the limit must end the sequence")
 }
 
 // TestReconnectDelay_ExponentialBackoffWithJitter verifies the delay grows
@@ -245,10 +261,10 @@ func TestManager_Cancel(t *testing.T) {
 	m.lastConnectedProfile = &profile.Profile{Name: "Test"}
 
 	m.StartReconnect()
-	assert.NotNil(t, m.reconnectTimer)
+	assert.True(t, timerArmed(m))
 
 	m.Cancel()
-	assert.Nil(t, m.reconnectTimer)
+	assert.False(t, timerArmed(m))
 }
 
 func TestManager_PerformReconnect_Success(t *testing.T) {
@@ -272,6 +288,11 @@ func TestManager_PerformReconnect_Success(t *testing.T) {
 		return nil
 	}
 	m.ctx = context.Background()
+
+	// performReconnect only ever runs for an attempt the timer armed.
+	m.mu.Lock()
+	m.attemptCount = 1
+	m.mu.Unlock()
 
 	m.performReconnect()
 
@@ -303,6 +324,11 @@ func TestManager_PerformReconnect_SAML_NoPassword(t *testing.T) {
 		return nil
 	}
 	m.ctx = context.Background()
+
+	// performReconnect only ever runs for an attempt the timer armed.
+	m.mu.Lock()
+	m.attemptCount = 1
+	m.mu.Unlock()
 
 	m.performReconnect()
 
@@ -357,6 +383,11 @@ func TestManager_PerformReconnect_NoPasswordProvider(t *testing.T) {
 		return nil
 	}
 
+	// performReconnect only ever runs for an attempt the timer armed.
+	m.mu.Lock()
+	m.attemptCount = 1
+	m.mu.Unlock()
+
 	m.performReconnect()
 
 	assert.True(t, failedCalled)
@@ -382,6 +413,11 @@ func TestManager_PerformReconnect_PasswordError(t *testing.T) {
 		t.Error("Connect should not be called")
 		return nil
 	}
+
+	// performReconnect only ever runs for an attempt the timer armed.
+	m.mu.Lock()
+	m.attemptCount = 1
+	m.mu.Unlock()
 
 	m.performReconnect()
 
@@ -426,6 +462,11 @@ func TestManager_PerformReconnect_Certificate_NoPassword(t *testing.T) {
 		return nil
 	}
 
+	// performReconnect only ever runs for an attempt the timer armed.
+	m.mu.Lock()
+	m.attemptCount = 1
+	m.mu.Unlock()
+
 	m.performReconnect()
 
 	select {
@@ -436,4 +477,409 @@ func TestManager_PerformReconnect_Certificate_NoPassword(t *testing.T) {
 
 	assert.Equal(t, "", connectedPassword)
 	assert.NoError(t, failed, "certificate reconnect must not report a password failure")
+}
+
+// TestManager_ShouldReconnect_ReArmsAfterFailedAttempt is the defect this suite
+// missed: a reconnect attempt ends Connecting->Failed, never
+// Connected->Disconnected, so without a second trigger the sequence stops after
+// one try and MaxAttempts is unreachable.
+func TestManager_ShouldReconnect_ReArmsAfterFailedAttempt(t *testing.T) {
+	// newRetrying returns a manager whose first attempt is under way, as it is
+	// once StartReconnect's timer has fired.
+	newRetrying := func(maxAttempts int) *Manager {
+		m := NewManager(Config{MaxAttempts: maxAttempts, DelaySeconds: 10}, nil)
+		m.lastConnectedProfile = &profile.Profile{
+			Name:          "Test",
+			AuthMethod:    profile.AuthMethodCertificate,
+			AutoReconnect: true,
+		}
+		m.SetConnectFunc(func(context.Context, *profile.Profile, string) error { return nil })
+
+		require.True(t, m.ShouldReconnect(vpn.StateConnected, vpn.StateDisconnected),
+			"the original drop must arm the first attempt")
+		m.StartReconnect()
+		m.performReconnect()
+		return m
+	}
+
+	for _, terminal := range []vpn.ConnectionState{vpn.StateDisconnected, vpn.StateFailed} {
+		t.Run("a failed attempt re-arms, ending in "+string(terminal), func(t *testing.T) {
+			m := newRetrying(3)
+			defer m.Cancel()
+
+			assert.True(t, m.ShouldReconnect(vpn.StateConnecting, terminal),
+				"a reconnect attempt that failed must arm the next one")
+		})
+	}
+
+	t.Run("stops at the configured limit", func(t *testing.T) {
+		m := newRetrying(3)
+		defer m.Cancel()
+
+		for i := 2; i <= 3; i++ {
+			require.True(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed),
+				"attempt %d of 3 must be armed", i)
+			m.StartReconnect()
+			m.performReconnect()
+			require.Equal(t, i, m.GetAttemptCount())
+		}
+
+		assert.False(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed),
+			"the sequence must stop once MaxAttempts is reached")
+		assert.Zero(t, m.GetAttemptCount(), "a finished sequence must not leak into the next one")
+	})
+
+	t.Run("a connect the user started is not a reconnect", func(t *testing.T) {
+		m := NewManager(Config{MaxAttempts: 3, DelaySeconds: 10}, nil)
+		m.lastConnectedProfile = &profile.Profile{
+			Name:          "Test",
+			AuthMethod:    profile.AuthMethodCertificate,
+			AutoReconnect: true,
+		}
+
+		assert.False(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed),
+			"no attempt is in flight, so a failed manual connect must not arm one")
+	})
+
+	t.Run("the state change landing first still counts once", func(t *testing.T) {
+		m := NewManager(Config{MaxAttempts: 3, DelaySeconds: 10}, nil)
+		m.lastConnectedProfile = &profile.Profile{
+			Name:          "Test",
+			AuthMethod:    profile.AuthMethodCertificate,
+			AutoReconnect: true,
+		}
+		// The controller fails the attempt and only then returns the error, so
+		// the re-arm happens while Connect is still on the stack.
+		m.SetConnectFunc(func(context.Context, *profile.Profile, string) error {
+			if m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed) {
+				m.StartReconnect()
+			}
+			return errors.New("pkexec dismissed")
+		})
+
+		require.True(t, m.ShouldReconnect(vpn.StateConnected, vpn.StateDisconnected))
+		m.StartReconnect()
+		m.performReconnect()
+		defer m.Cancel()
+
+		assert.Equal(t, 2, m.GetAttemptCount(),
+			"the returned error must be ignored once the state change has re-armed")
+	})
+
+	t.Run("one failure reported twice counts once", func(t *testing.T) {
+		m := NewManager(Config{MaxAttempts: 3, DelaySeconds: 10}, nil)
+		m.lastConnectedProfile = &profile.Profile{
+			Name:          "Test",
+			AuthMethod:    profile.AuthMethodCertificate,
+			AutoReconnect: true,
+		}
+		// Connect both moves the controller to Failed and returns the error.
+		m.SetConnectFunc(func(context.Context, *profile.Profile, string) error {
+			return errors.New("pkexec dismissed")
+		})
+
+		require.True(t, m.ShouldReconnect(vpn.StateConnected, vpn.StateDisconnected))
+		m.StartReconnect()
+		m.performReconnect() // re-arms on the returned error
+		defer m.Cancel()
+
+		require.Equal(t, 2, m.GetAttemptCount())
+		assert.False(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed),
+			"the state change for a failure already counted must not arm again")
+		assert.Equal(t, 2, m.GetAttemptCount())
+	})
+}
+
+// TestManager_ShouldReconnect_EndsSequenceAtLimit checks the counter is cleared
+// when the retries stop. The state change being handled reports the failure to
+// the user, so no callback fires here.
+func TestManager_ShouldReconnect_EndsSequenceAtLimit(t *testing.T) {
+	m := NewManager(Config{MaxAttempts: 1, DelaySeconds: 10}, nil)
+	m.lastConnectedProfile = &profile.Profile{
+		Name:          "Test",
+		AuthMethod:    profile.AuthMethodCertificate,
+		AutoReconnect: true,
+	}
+	m.SetConnectFunc(func(context.Context, *profile.Profile, string) error { return nil })
+
+	failed := make(chan error, 1)
+	m.SetCallbacks(Callbacks{OnFailed: func(err error) { failed <- err }})
+
+	require.True(t, m.ShouldReconnect(vpn.StateConnected, vpn.StateDisconnected))
+	m.StartReconnect()
+	m.performReconnect()
+
+	assert.False(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed))
+	assert.Zero(t, m.GetAttemptCount(), "a finished sequence must not leak into the next one")
+	assert.Empty(t, failed, "the terminal state change already reports this failure")
+}
+
+// TestManager_Cancel_ResetsAttempts stops a stale sequence being inherited by
+// the next connection the user starts by hand.
+func TestManager_Cancel_ResetsAttempts(t *testing.T) {
+	m := NewManager(Config{MaxAttempts: 3, DelaySeconds: 10}, nil)
+	m.lastConnectedProfile = &profile.Profile{Name: "Test"}
+
+	m.StartReconnect()
+	require.Equal(t, 1, m.GetAttemptCount())
+
+	m.Cancel()
+
+	assert.Zero(t, m.GetAttemptCount())
+}
+
+// TestManager_PerformReconnect_SyncFailureReArms covers a connect that never
+// starts — pkexec refused, say. It raises no state change, so nothing else can
+// notice the attempt died.
+func TestManager_PerformReconnect_SyncFailureReArms(t *testing.T) {
+	m := NewManager(Config{MaxAttempts: 3, DelaySeconds: 10}, nil)
+	m.lastConnectedProfile = &profile.Profile{
+		ID:            "test-id",
+		Name:          "Test",
+		AuthMethod:    profile.AuthMethodCertificate,
+		AutoReconnect: true,
+	}
+	m.SetConnectFunc(func(context.Context, *profile.Profile, string) error {
+		return errors.New("pkexec dismissed")
+	})
+
+	m.attemptCount = 1
+	m.performReconnect()
+
+	assert.Equal(t, 2, m.GetAttemptCount(), "a connect that never started must arm the next attempt")
+	assert.True(t, timerArmed(m))
+	m.Cancel()
+}
+
+// TestManager_PerformReconnect_SyncFailureGivesUpAtLimit is the same path at
+// the end of the sequence.
+func TestManager_PerformReconnect_SyncFailureGivesUpAtLimit(t *testing.T) {
+	m := NewManager(Config{MaxAttempts: 2, DelaySeconds: 10}, nil)
+	m.lastConnectedProfile = &profile.Profile{
+		ID:            "test-id",
+		Name:          "Test",
+		AuthMethod:    profile.AuthMethodCertificate,
+		AutoReconnect: true,
+	}
+	m.SetConnectFunc(func(context.Context, *profile.Profile, string) error {
+		return errors.New("pkexec dismissed")
+	})
+
+	failed := make(chan error, 1)
+	m.SetCallbacks(Callbacks{OnFailed: func(err error) { failed <- err }})
+
+	m.attemptCount = 2
+	m.performReconnect()
+
+	select {
+	case err := <-failed:
+		assert.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("the last attempt failing must report the failure")
+	}
+
+	assert.Zero(t, m.GetAttemptCount())
+}
+
+// TestManager_RetryOrGiveUp_IgnoresEndedSequence covers a sequence that ends
+// between an attempt claiming its slot and that attempt's error coming back —
+// a Cancel from a connection the user started, say. The late error must not
+// restart what was just stopped.
+func TestManager_RetryOrGiveUp_IgnoresEndedSequence(t *testing.T) {
+	m := NewManager(Config{MaxAttempts: 3, DelaySeconds: 10}, nil)
+	m.lastConnectedProfile = &profile.Profile{
+		Name:          "Test",
+		AuthMethod:    profile.AuthMethodCertificate,
+		AutoReconnect: true,
+	}
+
+	failed := make(chan error, 1)
+	m.SetCallbacks(Callbacks{OnFailed: func(err error) { failed <- err }})
+
+	m.Cancel() // the sequence is over: attemptCount and running are both zero
+
+	m.retryOrGiveUp(errors.New("pkexec dismissed"))
+
+	assert.Zero(t, m.GetAttemptCount(), "an ended sequence must not be restarted")
+	assert.False(t, timerArmed(m), "nor armed with a fresh timer")
+	assert.Empty(t, failed, "nor reported as a fresh failure")
+}
+
+// timerArmed reports whether a reconnect is pending, taking the lock the timer
+// callback also uses.
+func timerArmed(m *Manager) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reconnectTimer != nil
+}
+
+// startedSequence returns a manager one attempt into a live sequence, as it is
+// once StartReconnect's timer has fired.
+func startedSequence(t *testing.T, cfg Config, connect ConnectFunc) *Manager {
+	t.Helper()
+
+	m := NewManager(cfg, nil)
+	m.lastConnectedProfile = &profile.Profile{
+		ID:            "test-id",
+		Name:          "Test",
+		AuthMethod:    profile.AuthMethodPassword,
+		AutoReconnect: true,
+	}
+	m.SetPasswordProvider(&mockPasswordProvider{passwords: map[string]string{"test-id": "pw"}})
+	m.SetConnectFunc(connect)
+
+	require.True(t, m.ShouldReconnect(vpn.StateConnected, vpn.StateDisconnected))
+	m.StartReconnect()
+	return m
+}
+
+// TestManager_PerformReconnect_PasswordFailureEndsSequence covers a keyring that
+// stops answering mid-sequence. The attempt is abandoned before it starts, so
+// the sequence has to end rather than leave a claimed attempt behind that a
+// later unrelated failure could re-arm.
+func TestManager_PerformReconnect_PasswordFailureEndsSequence(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider PasswordProvider
+	}{
+		{"no provider configured", nil},
+		{"provider fails", &mockPasswordProvider{err: errors.New("keyring locked")}},
+		{"stored password is empty", &mockPasswordProvider{passwords: map[string]string{"test-id": ""}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := startedSequence(t, Config{MaxAttempts: 3, DelaySeconds: 10},
+				func(context.Context, *profile.Profile, string) error { return nil })
+			m.SetPasswordProvider(tt.provider)
+
+			failed := make(chan error, 1)
+			m.SetCallbacks(Callbacks{OnFailed: func(err error) { failed <- err }})
+
+			m.performReconnect()
+
+			select {
+			case err := <-failed:
+				assert.Error(t, err)
+			case <-time.After(time.Second):
+				t.Fatal("an unusable password must be reported")
+			}
+
+			assert.Zero(t, m.GetAttemptCount(), "the sequence must end, not stall mid-count")
+			assert.False(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed),
+				"no phantom attempt may survive to be re-armed")
+		})
+	}
+}
+
+// TestManager_PerformReconnect_AbandonedAttemptEndsSequence covers the attempt
+// that is dropped before it starts because the user disconnected while the
+// timer was running.
+func TestManager_PerformReconnect_AbandonedAttemptEndsSequence(t *testing.T) {
+	m := startedSequence(t, Config{MaxAttempts: 3, DelaySeconds: 10},
+		func(context.Context, *profile.Profile, string) error {
+			t.Fatal("a user disconnect must not reach the connect function")
+			return nil
+		})
+	m.SetUserDisconnect()
+
+	m.performReconnect()
+
+	assert.Zero(t, m.GetAttemptCount())
+	assert.False(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed))
+}
+
+// TestManager_OnConnectionSucceeded_RestoresBudget holds the user-visible
+// promise of MaxAttempts: a reconnect that succeeds on a later attempt leaves
+// the next drop a full budget, not the remainder of the last one.
+func TestManager_OnConnectionSucceeded_RestoresBudget(t *testing.T) {
+	m := startedSequence(t, Config{MaxAttempts: 3, DelaySeconds: 10},
+		func(context.Context, *profile.Profile, string) error { return nil })
+	defer m.Cancel()
+
+	m.performReconnect()
+	require.True(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed))
+	m.StartReconnect()
+	require.Equal(t, 2, m.GetAttemptCount())
+
+	m.OnConnectionSucceeded()
+	assert.Zero(t, m.GetAttemptCount())
+
+	// A later drop starts counting from one again.
+	require.True(t, m.ShouldReconnect(vpn.StateConnected, vpn.StateDisconnected))
+	m.StartReconnect()
+	assert.Equal(t, 1, m.GetAttemptCount(), "a successful reconnect must restore the whole budget")
+}
+
+// TestManager_StartReconnect_DispatchesThroughScheduleOnMain closes the retry
+// loop the way production does. The callback must not run the connect on the
+// timer goroutine: the UI work it triggers is not thread-safe.
+func TestManager_StartReconnect_DispatchesThroughScheduleOnMain(t *testing.T) {
+	connected := make(chan struct{})
+	scheduled := make(chan struct{}, 1)
+
+	m := NewManager(Config{MaxAttempts: 1, DelaySeconds: 1}, func(fn func()) {
+		select {
+		case scheduled <- struct{}{}:
+		default:
+		}
+		fn()
+	})
+	m.lastConnectedProfile = &profile.Profile{
+		ID:            "test-id",
+		Name:          "Test",
+		AuthMethod:    profile.AuthMethodCertificate,
+		AutoReconnect: true,
+	}
+	m.SetConnectFunc(func(context.Context, *profile.Profile, string) error {
+		close(connected)
+		return nil
+	})
+
+	m.StartReconnect()
+
+	select {
+	case <-connected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the armed timer never performed the reconnect")
+	}
+
+	assert.Len(t, scheduled, 1, "the attempt must be marshalled onto the main thread")
+}
+
+// TestManager_EndedSequence_LeavesNoPhantomAttempt covers the claim outliving
+// the sequence that made it. A stale attempt number can coincide with the next
+// sequence's count, arming a reconnect for an attempt that never ran.
+func TestManager_EndedSequence_LeavesNoPhantomAttempt(t *testing.T) {
+	m := startedSequence(t, Config{MaxAttempts: 3, DelaySeconds: 10},
+		func(context.Context, *profile.Profile, string) error { return nil })
+	m.performReconnect() // attempt 1 is claimed and under way
+
+	m.Cancel() // the user starts their own connection, ending the sequence
+
+	// That connection drops, opening a fresh sequence whose first attempt has
+	// been armed but not yet performed.
+	require.True(t, m.ShouldReconnect(vpn.StateConnected, vpn.StateDisconnected))
+	m.StartReconnect()
+	defer m.Cancel()
+	require.Equal(t, 1, m.GetAttemptCount())
+
+	assert.False(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed),
+		"no attempt has been performed in this sequence, so nothing may re-arm")
+}
+
+// TestManager_PerformReconnect_IgnoresCancelledSequence covers the timer that
+// has already dispatched: Cancel cannot retract it, so the attempt itself has
+// to notice the sequence is over.
+func TestManager_PerformReconnect_IgnoresCancelledSequence(t *testing.T) {
+	m := startedSequence(t, Config{MaxAttempts: 3, DelaySeconds: 10},
+		func(context.Context, *profile.Profile, string) error {
+			t.Fatal("a cancelled sequence must not connect")
+			return nil
+		})
+
+	m.Cancel()
+	m.performReconnect()
+
+	assert.Zero(t, m.GetAttemptCount())
 }

@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed and tells you what happened, instead of leaving a dead tunnel showing
   as connected until the application is restarted. A request already in flight
   when the helper stops fails immediately rather than waiting out its timeout.
+- Automatic reconnection now keeps retrying up to its configured limit. Only
+  the first attempt was ever made: if it failed, the sequence stopped there and
+  `max_reconnect_attempts` had no effect beyond it. A reconnect that runs out
+  of attempts now says so instead of leaving "Reconnecting" on screen.
 - Throughput now appears after an automatic reconnect. A connection that ended
   left its address and interface name behind, and the next session measured the
   device that had gone away, so the transfer counters stayed empty for its whole

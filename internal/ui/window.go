@@ -850,8 +850,11 @@ func (w *MainWindow) doConnect(p *profile.Profile, opts *vpn.ConnectOptions) {
 	// Clear previous logs
 	w.logDialog.Clear()
 
-	// Store profile for potential reconnect
+	// Store profile for potential reconnect. Cancel first: a connection the
+	// user started begins its own sequence, and must not inherit the attempt
+	// count of one that was still retrying.
 	if w.deps.ReconnectManager != nil {
+		w.deps.ReconnectManager.Cancel()
 		w.deps.ReconnectManager.StoreConnectedProfile(p)
 	}
 
