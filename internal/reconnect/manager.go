@@ -331,6 +331,14 @@ func (m *Manager) GetAttemptCount() int {
 
 func (m *Manager) performReconnect() {
 	m.mu.Lock()
+	// A timer already dispatched cannot be retracted, so the sequence may have
+	// ended while this was queued. Attempt zero means it did.
+	if m.attemptCount == 0 {
+		m.mu.Unlock()
+		slog.Debug("Skipping reconnect: the sequence ended before this attempt ran")
+		return
+	}
+
 	p := m.lastConnectedProfile
 	attempt := m.attemptCount
 	// Claim this attempt, so a failure reported twice re-arms only once.

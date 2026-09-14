@@ -535,9 +535,10 @@ func (a *App) ensureWindow() {
 			},
 			OnFailed: func(err error) {
 				// Reconnecting has stopped, so show where the tunnel actually
-				// ended up rather than assuming it merely disconnected.
-				state := a.vpnController.GetState()
+				// ended up. Read on the main thread: a connection started in
+				// the meantime must not be overwritten with a stale state.
 				glib.IdleAdd(func() {
+					state := a.vpnController.GetState()
 					if a.window != nil {
 						a.window.statusDisplay.SetState(state)
 					}

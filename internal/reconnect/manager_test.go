@@ -289,6 +289,11 @@ func TestManager_PerformReconnect_Success(t *testing.T) {
 	}
 	m.ctx = context.Background()
 
+	// performReconnect only ever runs for an attempt the timer armed.
+	m.mu.Lock()
+	m.attemptCount = 1
+	m.mu.Unlock()
+
 	m.performReconnect()
 
 	select {
@@ -319,6 +324,11 @@ func TestManager_PerformReconnect_SAML_NoPassword(t *testing.T) {
 		return nil
 	}
 	m.ctx = context.Background()
+
+	// performReconnect only ever runs for an attempt the timer armed.
+	m.mu.Lock()
+	m.attemptCount = 1
+	m.mu.Unlock()
 
 	m.performReconnect()
 
@@ -373,6 +383,11 @@ func TestManager_PerformReconnect_NoPasswordProvider(t *testing.T) {
 		return nil
 	}
 
+	// performReconnect only ever runs for an attempt the timer armed.
+	m.mu.Lock()
+	m.attemptCount = 1
+	m.mu.Unlock()
+
 	m.performReconnect()
 
 	assert.True(t, failedCalled)
@@ -398,6 +413,11 @@ func TestManager_PerformReconnect_PasswordError(t *testing.T) {
 		t.Error("Connect should not be called")
 		return nil
 	}
+
+	// performReconnect only ever runs for an attempt the timer armed.
+	m.mu.Lock()
+	m.attemptCount = 1
+	m.mu.Unlock()
 
 	m.performReconnect()
 
@@ -441,6 +461,11 @@ func TestManager_PerformReconnect_Certificate_NoPassword(t *testing.T) {
 		close(done)
 		return nil
 	}
+
+	// performReconnect only ever runs for an attempt the timer armed.
+	m.mu.Lock()
+	m.attemptCount = 1
+	m.mu.Unlock()
 
 	m.performReconnect()
 
@@ -841,4 +866,20 @@ func TestManager_EndedSequence_LeavesNoPhantomAttempt(t *testing.T) {
 
 	assert.False(t, m.ShouldReconnect(vpn.StateConnecting, vpn.StateFailed),
 		"no attempt has been performed in this sequence, so nothing may re-arm")
+}
+
+// TestManager_PerformReconnect_IgnoresCancelledSequence covers the timer that
+// has already dispatched: Cancel cannot retract it, so the attempt itself has
+// to notice the sequence is over.
+func TestManager_PerformReconnect_IgnoresCancelledSequence(t *testing.T) {
+	m := startedSequence(t, Config{MaxAttempts: 3, DelaySeconds: 10},
+		func(context.Context, *profile.Profile, string) error {
+			t.Fatal("a cancelled sequence must not connect")
+			return nil
+		})
+
+	m.Cancel()
+	m.performReconnect()
+
+	assert.Zero(t, m.GetAttemptCount())
 }
