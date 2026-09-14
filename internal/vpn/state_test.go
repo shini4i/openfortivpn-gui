@@ -204,3 +204,23 @@ func TestIsValidTransition_UnknownState(t *testing.T) {
 	assert.False(t, IsValidTransition(StateDisconnected, unknownState))
 	assert.False(t, IsValidTransition(StateConnected, unknownState))
 }
+
+func TestConnectionState_IsTerminal(t *testing.T) {
+	tests := []struct {
+		state    ConnectionState
+		expected bool
+	}{
+		{StateDisconnected, true},
+		{StateFailed, true},
+		{StateConnected, false},
+		{StateConnecting, false},
+		{StateAuthenticating, false},
+		{StateReconnecting, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.state), func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.state.IsTerminal())
+		})
+	}
+}

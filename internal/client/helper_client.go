@@ -153,13 +153,13 @@ func (c *HelperClient) detectInterface(assignedIP string) {
 }
 
 // storeInterfaceIfCurrent records iface as the tunnel interface unless the
-// connection has moved on — a different address or a disconnect. Reports
-// whether it stored the name.
+// connection has moved on — a different address or the connection ending.
+// Reports whether it stored the name.
 func (c *HelperClient) storeInterfaceIfCurrent(assignedIP, iface string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.assignedIP != assignedIP || c.state == vpn.StateDisconnected {
+	if c.assignedIP != assignedIP || c.state.IsTerminal() {
 		return false
 	}
 	c.interfaceName = iface
@@ -244,6 +244,8 @@ func (c *HelperClient) OnError(callback func(err error)) {
 	c.onError = callback
 }
 
+// syncState adopts the daemon's current status as the client's own. Addressing
+// reported alongside a terminal state is dropped rather than trusted.
 func (c *HelperClient) syncState() error {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
 	defer cancel()
@@ -258,15 +260,22 @@ func (c *HelperClient) syncState() error {
 		return fmt.Errorf("failed to parse status: %w", err)
 	}
 
+	// The daemon is a separate binary and may be an older build, so its
+	// addressing is not trusted to be empty in a terminal state.
 	c.mu.Lock()
 	c.state = vpn.ConnectionState(status.State)
-	c.assignedIP = status.AssignedIP
-	assignedIP := status.AssignedIP
+	live := !c.state.IsTerminal()
+	if live {
+		c.assignedIP = status.AssignedIP
+	} else {
+		c.assignedIP = ""
+		c.interfaceName = ""
+	}
 	c.mu.Unlock()
 
 	// If we restored a connected state with an assigned IP, detect the interface
-	if assignedIP != "" {
-		go c.detectInterface(assignedIP)
+	if live && status.AssignedIP != "" {
+		go c.detectInterface(status.AssignedIP)
 	}
 
 	return nil
@@ -466,7 +475,7 @@ func (c *HelperClient) handleEvent(event *protocol.Event) {
 		// No tunnel, no addressing: the interface.go contract says both read
 		// empty unless connected, and a failed tunnel is just as gone as a
 		// disconnected one.
-		if newState == vpn.StateDisconnected || newState == vpn.StateFailed {
+		if newState.IsTerminal() {
 			c.assignedIP = ""
 			c.interfaceName = ""
 		}
@@ -501,13 +510,19 @@ func (c *HelperClient) handleEvent(event *protocol.Event) {
 		// Update assigned IP if this is a got_ip event
 		if data.EventType == string(vpn.EventGotIP) {
 			if ip, ok := data.Data["ip"]; ok {
+				// The daemon's events are unordered, so this can arrive after
+				// the tunnel has already ended. Read the state and write the
+				// address in one critical section, or a state change landing
+				// between them resurrects a dead tunnel's addressing.
 				c.mu.Lock()
-				c.assignedIP = ip
-				// Verify state before spawning to avoid unnecessary goroutines.
-				shouldDetect := c.state != vpn.StateDisconnected
+				live := !c.state.IsTerminal()
+				if live {
+					c.assignedIP = ip
+				}
 				c.mu.Unlock()
+
 				// Detect the interface in background since it may take a moment to appear.
-				if shouldDetect {
+				if live {
 					go c.detectInterface(ip)
 				}
 			}

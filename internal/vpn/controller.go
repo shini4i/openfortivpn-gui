@@ -134,6 +134,12 @@ func (c *Controller) transition(newState ConnectionState, allowed func(current C
 
 	oldState := c.state
 	c.state = newState
+	// No tunnel, no addressing: interface.go promises both accessors read
+	// empty unless connected.
+	if newState.IsTerminal() {
+		c.assignedIP = ""
+		c.interfaceName = ""
+	}
 	callback := c.onStateChange
 	c.mu.Unlock()
 
@@ -230,20 +236,13 @@ func (c *Controller) GetAssignedIP() string {
 	return c.assignedIP
 }
 
-// setAssignedIP sets the assigned IP address.
-func (c *Controller) setAssignedIP(ip string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.assignedIP = ip
-}
-
 // setAddressingForAttempt records the tunnel's address and interface, ignoring
 // an attempt the controller has already moved past so its output cannot
 // overwrite a newer connection's addressing. Reports whether it applied.
 func (c *Controller) setAddressingForAttempt(attempt uint64, ip, iface string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.attempt != attempt {
+	if c.attempt != attempt || c.state.IsTerminal() {
 		return false
 	}
 	c.assignedIP = ip
@@ -267,13 +266,13 @@ func (c *Controller) detectInterface(attempt uint64, assignedIP string) {
 }
 
 // storeInterfaceIfCurrent records iface as the tunnel interface unless the
-// connection has moved on — a newer attempt, a different address, or a
-// disconnect. Reports whether it stored the name.
+// connection has moved on — a newer attempt, a different address, or the
+// connection ending. Reports whether it stored the name.
 func (c *Controller) storeInterfaceIfCurrent(attempt uint64, assignedIP, iface string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.attempt != attempt || c.assignedIP != assignedIP || c.state == StateDisconnected {
+	if c.attempt != attempt || c.assignedIP != assignedIP || c.state.IsTerminal() {
 		return false
 	}
 	c.interfaceName = iface
@@ -352,7 +351,6 @@ func (c *Controller) processOutput(attempt uint64, line string) {
 		}
 
 	case EventDisconnected:
-		c.setAddressingForAttempt(attempt, "", "")
 		if err := c.transition(StateDisconnected, isCurrent); err != nil {
 			c.emitError(fmt.Errorf("state transition failed: %w", err))
 		}
@@ -365,7 +363,7 @@ func (c *Controller) processOutput(attempt uint64, line string) {
 			// Detect the interface in background since it may take a moment to appear.
 			// Verify state under lock before spawning to avoid unnecessary goroutines.
 			c.mu.RLock()
-			shouldDetect := c.assignedIP == ip && c.state != StateDisconnected
+			shouldDetect := c.assignedIP == ip && !c.state.IsTerminal()
 			c.mu.RUnlock()
 			if shouldDetect {
 				go c.detectInterface(attempt, ip)

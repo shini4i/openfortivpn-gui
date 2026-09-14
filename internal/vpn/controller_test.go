@@ -158,12 +158,13 @@ func TestController_GetAssignedIP(t *testing.T) {
 	// Initially empty
 	assert.Empty(t, ctrl.GetAssignedIP())
 
-	// Set IP
-	ctrl.setAssignedIP("10.0.0.100")
+	// A live attempt records its address.
+	require.NoError(t, ctrl.setState(StateConnecting))
+	require.True(t, ctrl.setAddressingForAttempt(ctrl.attempt, "10.0.0.100", ""))
 	assert.Equal(t, "10.0.0.100", ctrl.GetAssignedIP())
 
-	// Clear IP
-	ctrl.setAssignedIP("")
+	// Ending the attempt drops it.
+	require.NoError(t, ctrl.setState(StateDisconnected))
 	assert.Empty(t, ctrl.GetAssignedIP())
 }
 
@@ -679,7 +680,7 @@ func TestController_StateTransitionOnDisconnect(t *testing.T) {
 	// Simulate being in connected state
 	_ = ctrl.setState(StateConnecting)
 	_ = ctrl.setState(StateConnected)
-	ctrl.setAssignedIP("10.0.0.1")
+	require.True(t, ctrl.setAddressingForAttempt(ctrl.attempt, "10.0.0.1", ""))
 
 	// Track state change
 	var newState ConnectionState
@@ -1810,11 +1811,125 @@ func TestController_StoreInterfaceIfCurrent(t *testing.T) {
 		assert.Empty(t, c.GetInterface())
 	})
 
-	t.Run("rejects an interface once disconnected", func(t *testing.T) {
-		c := newConnected()
-		c.state = StateDisconnected
+	for _, terminal := range []ConnectionState{StateDisconnected, StateFailed} {
+		t.Run("rejects an interface once "+string(terminal), func(t *testing.T) {
+			c := newConnected()
+			c.state = terminal
 
-		assert.False(t, c.storeInterfaceIfCurrent(c.attempt, "10.0.0.2", "ppp0"))
-		assert.Empty(t, c.GetInterface())
-	})
+			assert.False(t, c.storeInterfaceIfCurrent(c.attempt, "10.0.0.2", "ppp0"))
+			assert.Empty(t, c.GetInterface())
+		})
+	}
+}
+
+// TestController_ProcessExit_ClearsAddressing covers openfortivpn exiting
+// without announcing the tunnel is down — a crash or a kill. The interface.go
+// contract promises both accessors read empty unless connected, and a stale
+// interface name sends the next session's stats collector at a dead device.
+func TestController_ProcessExit_ClearsAddressing(t *testing.T) {
+	executor := NewMockExecutor()
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
+
+	p := &profile.Profile{
+		ID:         "550e8400-e29b-41d4-a716-446655440000",
+		Name:       "Test VPN",
+		Host:       "vpn.example.com",
+		Port:       443,
+		Username:   "testuser",
+		AuthMethod: profile.AuthMethodPassword,
+	}
+
+	// Pre-populate stdout: the scanner latches EOF on an empty buffer, so a
+	// line written after Connect can be missed entirely.
+	process := executor.GetProcess()
+	process.WriteToStdout("Got addresses: [10.0.0.100], ns [10.0.0.1, 10.0.0.2]")
+	process.WriteToStdout("Tunnel is up and running.")
+
+	require.NoError(t, ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "topsecret"}))
+
+	require.Eventually(t, func() bool {
+		return ctrl.GetAssignedIP() == "10.0.0.100"
+	}, time.Second, 10*time.Millisecond, "the tunnel's address must be recorded first")
+
+	// The process dies with no "Tunnel is down" line to trigger the cleanup.
+	process.CompleteProcess()
+
+	require.Eventually(t, func() bool {
+		return ctrl.GetState() == StateDisconnected
+	}, time.Second, 10*time.Millisecond, "a dead process must end in Disconnected")
+
+	assert.Empty(t, ctrl.GetAssignedIP(), "a dead tunnel's address must not survive the process")
+	assert.Empty(t, ctrl.GetInterface(), "nor its interface")
+}
+
+// TestController_ErrorAfterGotIP_ClearsAddressing covers a tunnel that reports
+// its address and then fails before coming up. The controller parks in Failed,
+// where the interface.go contract still says both accessors read empty — and
+// the helper daemon reports GetAssignedIP() with no state gate.
+func TestController_ErrorAfterGotIP_ClearsAddressing(t *testing.T) {
+	executor := NewMockExecutor()
+	ctrl := NewController("/usr/bin/openfortivpn", WithExecutor(executor))
+
+	p := &profile.Profile{
+		ID:         "550e8400-e29b-41d4-a716-446655440000",
+		Name:       "Test VPN",
+		Host:       "vpn.example.com",
+		Port:       443,
+		Username:   "testuser",
+		AuthMethod: profile.AuthMethodPassword,
+	}
+
+	process := executor.GetProcess()
+	process.WriteToStdout("Got addresses: [10.0.0.100], ns [10.0.0.1]")
+	process.WriteToStdout("ERROR:   Could not establish the tunnel.")
+
+	require.NoError(t, ctrl.Connect(context.Background(), p, &ConnectOptions{Password: "topsecret"}))
+
+	require.Eventually(t, func() bool {
+		return ctrl.GetState() == StateFailed
+	}, time.Second, 10*time.Millisecond, "an error while connecting must fail the attempt")
+
+	assert.Empty(t, ctrl.GetAssignedIP(), "a failed attempt's address must not survive")
+	assert.Empty(t, ctrl.GetInterface(), "nor its interface")
+
+	process.CompleteProcess()
+}
+
+// TestController_SetAddressingForAttempt_RefusesTerminalState pins the guard
+// that keeps the terminal clear sticky: the stdout and stderr scanners are
+// independent, so a "Got addresses" line can be parsed after an ERROR line has
+// already failed the attempt.
+func TestController_SetAddressingForAttempt_RefusesTerminalState(t *testing.T) {
+	for _, terminal := range []ConnectionState{StateDisconnected, StateFailed} {
+		t.Run(string(terminal), func(t *testing.T) {
+			c := NewController("/usr/bin/openfortivpn")
+			c.state = terminal
+
+			assert.False(t, c.setAddressingForAttempt(c.attempt, "10.0.0.100", "ppp0"))
+			assert.Empty(t, c.GetAssignedIP(), "a finished attempt must not regain an address")
+			assert.Empty(t, c.GetInterface())
+		})
+	}
+}
+
+// TestController_Transition_ClearsAddressing guards the interface.go contract
+// at the single choke point every state change passes through. A stale
+// interface name is the costlier half: it points the next session's stats
+// collector at a device that no longer exists.
+func TestController_Transition_ClearsAddressing(t *testing.T) {
+	for _, terminal := range []ConnectionState{StateDisconnected, StateFailed} {
+		t.Run(string(terminal), func(t *testing.T) {
+			ctrl := NewController("/usr/bin/openfortivpn")
+
+			require.NoError(t, ctrl.setState(StateConnecting))
+			require.NoError(t, ctrl.setState(StateConnected))
+			require.True(t, ctrl.setAddressingForAttempt(ctrl.attempt, "10.0.0.2", "ppp0"))
+			require.Equal(t, "ppp0", ctrl.GetInterface(), "the live tunnel's interface must be recorded first")
+
+			require.NoError(t, ctrl.setState(terminal))
+
+			assert.Empty(t, ctrl.GetAssignedIP())
+			assert.Empty(t, ctrl.GetInterface())
+		})
+	}
 }

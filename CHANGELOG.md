@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed and tells you what happened, instead of leaving a dead tunnel showing
   as connected until the application is restarted. A request already in flight
   when the helper stops fails immediately rather than waiting out its timeout.
+- Throughput now appears after an automatic reconnect. A connection that ended
+  left its address and interface name behind, and the next session measured the
+  device that had gone away, so the transfer counters stayed empty for its whole
+  duration.
 
 ## [0.4.1] - 2026-09-02
 
