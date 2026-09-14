@@ -534,13 +534,15 @@ func (a *App) ensureWindow() {
 				// Callbacks are handled by state change handler in window.go
 			},
 			OnFailed: func(err error) {
-				// When reconnect fails (e.g., password not available), update UI
+				// Reconnecting has stopped, so show where the tunnel actually
+				// ended up rather than assuming it merely disconnected.
+				state := a.vpnController.GetState()
 				glib.IdleAdd(func() {
 					if a.window != nil {
-						a.window.statusDisplay.SetState(vpn.StateDisconnected)
+						a.window.statusDisplay.SetState(state)
 					}
 					if a.tray != nil {
-						a.tray.SetState(vpn.StateDisconnected)
+						a.tray.SetState(state)
 					}
 				})
 			},

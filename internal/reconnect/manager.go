@@ -75,15 +75,21 @@ type ConnectFunc func(ctx context.Context, p *profile.Profile, password string) 
 type Callbacks struct {
 	// OnReconnecting is called when a reconnect attempt is about to start.
 	OnReconnecting func()
-	// OnFailed is called when reconnect fails and cannot continue.
+	// OnFailed is called when a reconnect cannot continue and nothing else
+	// reports it. Reaching the attempt limit through a terminal state change
+	// does not call it: that change is itself the report.
 	OnFailed func(err error)
 }
 
 // Manager handles automatic VPN reconnection logic.
 // It is safe for concurrent use.
 type Manager struct {
-	mu                      sync.Mutex
-	attemptCount            int
+	mu           sync.Mutex
+	attemptCount int
+	// running is the attempt performReconnect is executing. A failure can
+	// reach us twice — as a returned error and as a state change — so only the
+	// first one to advance attemptCount past it re-arms.
+	running                 int
 	reconnectTimer          *time.Timer
 	userInitiatedDisconnect bool
 	lastConnectedProfile    *profile.Profile
@@ -134,13 +140,14 @@ func (m *Manager) SetCallbacks(cb Callbacks) {
 	m.callbacks = cb
 }
 
-// OnConnectionSucceeded should be called when a connection succeeds.
-// Resets the attempt counter, clears user-initiated flag, and cancels any pending timer.
+// OnConnectionSucceeded should be called when a connection succeeds. Ends the
+// reconnect sequence, so the next drop gets a full attempt budget, clears the
+// user-initiated flag, and cancels any pending timer.
 func (m *Manager) OnConnectionSucceeded() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.attemptCount = 0
+	m.endSequenceLocked()
 	m.userInitiatedDisconnect = false
 
 	// Cancel any pending reconnect timer
@@ -179,16 +186,23 @@ func (m *Manager) StoreConnectedProfile(p *profile.Profile) {
 	m.lastConnectedProfile = &profileCopy
 }
 
-// ShouldReconnect determines if reconnection should be attempted based on state transition.
-// Returns true if the disconnect was unexpected and reconnection is allowed.
+// ShouldReconnect reports whether a reconnect should be armed: an unexpected
+// drop from Connected, or the failure of an attempt this manager started. A
+// reconnect attempt never ends Connected->Disconnected, so without the second
+// case a sequence would stop after one try. Reaching MaxAttempts ends it here.
 func (m *Manager) ShouldReconnect(oldState, newState vpn.ConnectionState) bool {
-	// Only trigger on unexpected disconnect from Connected state
-	if oldState != vpn.StateConnected || newState != vpn.StateDisconnected {
-		return false
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// The tunnel dropped, or an attempt this manager started has just failed —
+	// a reconnect never ends Connected->Disconnected, so without the second
+	// case the sequence would stop after one try.
+	unexpectedDrop := oldState == vpn.StateConnected && newState == vpn.StateDisconnected
+	attemptFailed := m.attemptCount > 0 && m.attemptCount == m.running &&
+		oldState.IsTransitioning() && newState.IsTerminal()
+	if !unexpectedDrop && !attemptFailed {
+		return false
+	}
 
 	// Check for user-initiated disconnect
 	if m.userInitiatedDisconnect {
@@ -222,10 +236,27 @@ func (m *Manager) ShouldReconnect(oldState, newState vpn.ConnectionState) bool {
 			"profile", p.Name,
 			"attempts", m.attemptCount,
 			"max", m.config.MaxAttempts)
+		// No OnFailed here: the state change being handled already moves the
+		// display off "Reconnecting" and reports the failure.
+		m.endSequenceLocked()
 		return false
 	}
 
 	return true
+}
+
+// endSequence ends the reconnect sequence so the next connection starts from a
+// clean count.
+func (m *Manager) endSequence() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.endSequenceLocked()
+}
+
+// endSequenceLocked is endSequence for callers already holding m.mu.
+func (m *Manager) endSequenceLocked() {
+	m.attemptCount = 0
+	m.running = 0
 }
 
 // StartReconnect begins the reconnection sequence.
@@ -276,10 +307,13 @@ func (m *Manager) StartReconnect() {
 		"delay", delay)
 }
 
-// Cancel stops any pending reconnection attempt.
+// Cancel stops any pending reconnection attempt and ends the sequence, so the
+// next connection starts from a clean attempt count.
 func (m *Manager) Cancel() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.endSequenceLocked()
 
 	if m.reconnectTimer != nil {
 		m.reconnectTimer.Stop()
@@ -299,6 +333,8 @@ func (m *Manager) performReconnect() {
 	m.mu.Lock()
 	p := m.lastConnectedProfile
 	attempt := m.attemptCount
+	// Claim this attempt, so a failure reported twice re-arms only once.
+	m.running = attempt
 	userDisconnected := m.userInitiatedDisconnect
 	ctx := m.ctx
 	connectFunc := m.connectFunc
@@ -306,19 +342,24 @@ func (m *Manager) performReconnect() {
 	callbacks := m.callbacks
 	m.mu.Unlock()
 
-	// Check if user disconnected during timer wait
+	// Each of these abandons the attempt without starting it, so the sequence
+	// ends here — a claimed attempt left behind would let an unrelated later
+	// failure arm a reconnect nobody asked for.
 	if userDisconnected {
 		slog.Debug("Skipping reconnect: user initiated disconnect during timer wait")
+		m.endSequence()
 		return
 	}
 
 	if p == nil {
 		slog.Error("Cannot reconnect: no profile stored")
+		m.endSequence()
 		return
 	}
 
 	if connectFunc == nil {
 		slog.Error("Cannot reconnect: no connect function configured")
+		m.endSequence()
 		return
 	}
 
@@ -332,6 +373,7 @@ func (m *Manager) performReconnect() {
 	} else {
 		if passwordProvider == nil {
 			slog.Error("Cannot reconnect: password provider not available", "profile", p.Name)
+			m.endSequence()
 			if callbacks.OnFailed != nil {
 				callbacks.OnFailed(errors.New("password provider not configured"))
 			}
@@ -346,6 +388,7 @@ func (m *Manager) performReconnect() {
 			}
 			slog.Error("Cannot reconnect: password not available in keyring",
 				"profile", p.Name, "error", err)
+			m.endSequence()
 			if callbacks.OnFailed != nil {
 				callbacks.OnFailed(err)
 			}
@@ -362,9 +405,40 @@ func (m *Manager) performReconnect() {
 		callbacks.OnReconnecting()
 	}
 
-	// Perform the reconnection
+	// Perform the reconnection. An attempt that starts and then fails reaches
+	// the next attempt through ShouldReconnect; one that never starts raises no
+	// state change at all, so it has to re-arm here or the sequence ends.
 	if err := connectFunc(ctx, p, password); err != nil {
 		slog.Error("Reconnect failed", "profile", p.Name, "error", err)
-		// Don't call OnFailed here - let the state machine handle further attempts
+		m.retryOrGiveUp(err)
+	}
+}
+
+// retryOrGiveUp schedules another attempt, or ends the sequence once the
+// configured limit is reached. It does nothing when the state change for this
+// same failure has already re-armed.
+func (m *Manager) retryOrGiveUp(cause error) {
+	m.mu.Lock()
+	// A sequence that has already ended reads (0, 0), which must not count as
+	// a live attempt: nothing here may resurrect it.
+	stale := m.running == 0 || m.attemptCount != m.running
+	exhausted := m.attemptCount >= m.config.MaxAttempts
+	if !stale && exhausted {
+		m.endSequenceLocked()
+	}
+	onFailed := m.callbacks.OnFailed
+	m.mu.Unlock()
+
+	switch {
+	case stale:
+		return
+	case exhausted:
+		// Reported here because the caller may have raised no state change:
+		// a connect refused before it began, or a failed helper round trip.
+		if onFailed != nil {
+			onFailed(cause)
+		}
+	default:
+		m.StartReconnect()
 	}
 }
