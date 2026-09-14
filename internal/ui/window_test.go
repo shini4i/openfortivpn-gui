@@ -525,14 +525,15 @@ func TestMainWindow_DiscardPasswordForAuthMethod(t *testing.T) {
 // fakeProfileStore records saves. Only Save is exercised by saveProfile; the
 // rest of profile.StoreInterface is present to satisfy it.
 type fakeProfileStore struct {
-	saved   []string
-	saveErr error
+	saved     []string
+	saveErr   error
+	deleteErr error
 }
 
 func (f *fakeProfileStore) Load(string) (*profile.Profile, error) { return nil, nil }
 func (f *fakeProfileStore) List() (*profile.ListResult, error)    { return nil, nil }
 func (f *fakeProfileStore) Exists(string) (bool, error)           { return false, nil }
-func (f *fakeProfileStore) Delete(string) error                   { return nil }
+func (f *fakeProfileStore) Delete(string) error                   { return f.deleteErr }
 
 func (f *fakeProfileStore) Save(p *profile.Profile) error {
 	if f.saveErr != nil {
@@ -612,5 +613,22 @@ func TestMainWindow_SaveProfile(t *testing.T) {
 		assert.False(t, isNew)
 		assert.Empty(t, kr.deleted,
 			"the profile is still a password profile on disk, so it still needs its password")
+	})
+}
+
+// TestMainWindow_ShowError covers the single error path every failure now takes,
+// so a handler that reports one can be tested without a display.
+func TestMainWindow_ShowError(t *testing.T) {
+	const profileID = "3f8a1c6e-1d2b-4c9a-8e7f-0a1b2c3d4e5f"
+
+	t.Run("a failed delete reaches the seam", func(t *testing.T) {
+		var shown []string
+		store := &fakeProfileStore{deleteErr: errors.New("profile directory is read-only")}
+		w := &MainWindow{deps: &MainWindowDeps{ProfileStore: store, KeyringStore: &fakeKeyring{}}}
+		w.presentError = func(_, message string) { shown = append(shown, message) }
+
+		w.performDeleteProfile(&profile.Profile{ID: profileID})
+
+		assert.Equal(t, []string{"profile directory is read-only"}, shown)
 	})
 }
