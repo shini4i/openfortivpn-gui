@@ -41,23 +41,6 @@ nix profile install github:shini4i/nixpkgs#openfortivpn-gui
 
 A NixOS module is also available for declarative configuration.
 
-
-### Arch
-> [!NOTE]
-This package is not officially maintained by the author. For questions or issues, please open an issue on the AUR package page, not this repository.
-
-Install package from AUR
-```bash
-yay -S openfortivpn-gui-bin
-```
-
-After installation, enable passwordless VPN operations:
-
-```bash
-sudo usermod -aG openfortivpn-gui $USER
-# Log out and back in
-```
-
 ### Fedora
 
 Download the `.rpm` package from [GitHub Releases](https://github.com/shini4i/openfortivpn-gui/releases):
