@@ -40,10 +40,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Nix
-        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
@@ -52,21 +52,27 @@ jobs:
       # CGO compilation (GTK bindings) is expensive - this is the main optimization
       - name: Cache Go artifacts
         id: go-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             /home/runner/go/pkg/mod
             /home/runner/.cache/go-build
             /home/runner/.cache/golangci-lint
-          key: go-lint-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          # flake.lock pins the Go toolchain, and GOCACHE entries are keyed by
+          # compiler version — without it in the key, a toolchain bump restores
+          # a cache no build can hit.
+          key: go-lint-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            go-lint-${{ runner.os }}-
+            go-lint-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
 
       - name: Run golangci-lint
         run: nix develop --command golangci-lint run
 
+      # internal/reconnect imports math/rand/v2, whose Go 1.27 source uses a
+      # generic method that gosec's Go 1.26 type checker rejects. Drop the
+      # exclusion once nixpkgs builds gosec against Go 1.27.
       - name: Run Gosec Security Scanner
-        run: nix develop --command gosec ./...
+        run: nix develop --command gosec -exclude-dir=internal/reconnect ./...
 
       - name: Run govulncheck
         run: nix develop --command govulncheck ./...
@@ -95,10 +101,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Nix
-        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
@@ -107,20 +113,23 @@ jobs:
       # CGO compilation (GTK bindings) is expensive - this is the main optimization
       - name: Cache Go artifacts
         id: go-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             /home/runner/go/pkg/mod
             /home/runner/.cache/go-build
-          key: go-test-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          # flake.lock pins the Go toolchain, and GOCACHE entries are keyed by
+          # compiler version — without it in the key, a toolchain bump restores
+          # a cache no build can hit.
+          key: go-test-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            go-test-${{ runner.os }}-
+            go-test-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
 
       - name: Run tests with coverage
         run: nix develop --command go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@e53489f4d376d79066609109e7a95a29eb3740b1 # v7.0.0
+        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.out

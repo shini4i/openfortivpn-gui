@@ -47,7 +47,10 @@ tasks:
     desc: Run the same static analysis as CI
     cmds:
       - golangci-lint run
-      - gosec ./...
+      # internal/reconnect imports math/rand/v2, whose Go 1.27 source uses a
+      # generic method that gosec's Go 1.26 type checker rejects. Drop the
+      # exclusion once nixpkgs builds gosec against Go 1.27.
+      - gosec -exclude-dir=internal/reconnect ./...
       - govulncheck ./...
 
   vet:
