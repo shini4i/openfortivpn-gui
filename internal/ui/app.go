@@ -150,7 +150,7 @@ func NewApp(cfg *AppConfig) (*App, error) {
 // Run starts the GTK application and blocks until it exits.
 // Returns the exit code from the GTK application.
 func (a *App) Run(args []string) int {
-	a.app = adw.NewApplication(AppID, gio.ApplicationFlagsNone)
+	a.app = adw.NewApplication(AppID, gio.ApplicationDefaultFlags)
 
 	a.app.ConnectActivate(func() {
 		a.onActivate()

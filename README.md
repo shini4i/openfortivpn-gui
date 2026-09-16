@@ -1,18 +1,18 @@
-<h1 align="center">openfortivpn-gui</h1>
+<div align="center">
 
-<p align="center">
-  <img src="https://img.shields.io/github/go-mod/go-version/shini4i/openfortivpn-gui" alt="GitHub go.mod Go version">
-  <img src="https://img.shields.io/github/v/release/shini4i/openfortivpn-gui" alt="GitHub release">
-  <img src="https://img.shields.io/github/license/shini4i/openfortivpn-gui" alt="GitHub license">
-</p>
+# openfortivpn-gui
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/shini4i/assets/main/src/openfortivpn-gui/screenshot.png" alt="openfortivpn-gui screenshot" width="800">
-</p>
+A modern GTK4/libadwaita GUI client for Fortinet SSL VPN on Linux, wrapping the [openfortivpn](https://github.com/adrienverge/openfortivpn) CLI tool
 
-<p align="center">
-  A modern GTK4/libadwaita GUI client for Fortinet SSL VPN on Linux, wrapping the <a href="https://github.com/adrienverge/openfortivpn">openfortivpn</a> CLI tool.
-</p>
+[![CI](https://img.shields.io/github/actions/workflow/status/shini4i/openfortivpn-gui/run-tests.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/shini4i/openfortivpn-gui/actions/workflows/run-tests.yml)
+[![Coverage](https://img.shields.io/codecov/c/github/shini4i/openfortivpn-gui/main?style=flat-square&logo=codecov&logoColor=white&label=coverage)](https://codecov.io/gh/shini4i/openfortivpn-gui)
+[![Release](https://img.shields.io/github/v/release/shini4i/openfortivpn-gui?style=flat-square&logo=github&logoColor=white&label=release)](https://github.com/shini4i/openfortivpn-gui/releases/latest)
+[![Go](https://img.shields.io/github/go-mod/go-version/shini4i/openfortivpn-gui?style=flat-square&logo=go&logoColor=white&label=go)](https://go.dev/)
+[![License](https://img.shields.io/github/license/shini4i/openfortivpn-gui?style=flat-square&label=license)](LICENSE)
+
+<img src="https://raw.githubusercontent.com/shini4i/assets/main/src/openfortivpn-gui/screenshot.png" alt="openfortivpn-gui screenshot" width="800">
+
+</div>
 
 ## Features
 
