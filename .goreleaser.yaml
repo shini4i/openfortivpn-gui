@@ -2,6 +2,9 @@
 version: 2
 project_name: openfortivpn-gui
 
+# Debian's hardening flags come from dpkg-buildflags, which `go build` never
+# invokes, so stack protection for the cgo glue is set explicitly. "-O2 -g" is
+# Go's own CGO_CFLAGS default, repeated because setting the variable replaces it.
 builds:
   - id: gui
     main: ./cmd/openfortivpn-gui
@@ -10,6 +13,8 @@ builds:
     goarch: [amd64]
     env:
       - CGO_ENABLED=1
+      - CC=clang
+      - CGO_CFLAGS=-O2 -g -fstack-protector-strong
     ldflags:
       - -s -w
       - -X github.com/shini4i/openfortivpn-gui/internal/ui.Version={{.Version}}
@@ -21,6 +26,8 @@ builds:
     goarch: [amd64]
     env:
       - CGO_ENABLED=1
+      - CC=clang
+      - CGO_CFLAGS=-O2 -g -fstack-protector-strong
     ldflags:
       - -s -w
       - -X main.version={{.Version}}

@@ -58,12 +58,12 @@ jobs:
             /home/runner/go/pkg/mod
             /home/runner/.cache/go-build
             /home/runner/.cache/golangci-lint
-          # flake.lock pins the Go toolchain, and GOCACHE entries are keyed by
-          # compiler version — without it in the key, a toolchain bump restores
-          # a cache no build can hit.
-          key: go-lint-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ hashFiles('go.sum') }}
+          # flake.nix picks the cgo compiler and flake.lock pins the Go toolchain;
+          # GOCACHE entries are keyed by both, so without them in the key a
+          # compiler or toolchain change restores a cache no build can hit.
+          key: go-lint-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            go-lint-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+            go-lint-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}-
 
       - name: Run golangci-lint
         run: nix develop --command golangci-lint run
@@ -118,12 +118,12 @@ jobs:
           path: |
             /home/runner/go/pkg/mod
             /home/runner/.cache/go-build
-          # flake.lock pins the Go toolchain, and GOCACHE entries are keyed by
-          # compiler version — without it in the key, a toolchain bump restores
-          # a cache no build can hit.
-          key: go-test-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ hashFiles('go.sum') }}
+          # flake.nix picks the cgo compiler and flake.lock pins the Go toolchain;
+          # GOCACHE entries are keyed by both, so without them in the key a
+          # compiler or toolchain change restores a cache no build can hit.
+          key: go-test-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            go-test-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+            go-test-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}-
 
       - name: Run tests with coverage
         run: nix develop --command go test -race -coverprofile=coverage.out -covermode=atomic ./...

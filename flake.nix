@@ -16,6 +16,11 @@
           nativeBuildInputs = with pkgs; [
             go_1_27
             go-task
+            # cgo's C compiler. clang builds the gotk4/libadwaita shims roughly
+            # 5x faster than gcc on a cold GOCACHE. The goreleaser artifacts use
+            # it too, so this shell, CI and the released deb/rpm share one
+            # compiler; the nixpkgs package builds with its own stdenv.
+            clang
             goreleaser
             pkg-config
             gobject-introspection
@@ -33,6 +38,11 @@
           ];
 
           shellHook = ''
+            # Must be exported here, not set as an mkShell attribute: the
+            # stdenv cc-wrapper's setup hook runs later and would overwrite
+            # the attribute with gcc.
+            export CC=clang
+
             echo "openfortivpn-gui development shell"
             echo "Go version: $(go version)"
             echo ""
