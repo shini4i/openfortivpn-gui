@@ -57,6 +57,19 @@ func TestManager_SetUserDisconnect(t *testing.T) {
 	assert.True(t, m.userInitiatedDisconnect)
 }
 
+// TestManager_ClearUserDisconnect covers a disconnect that failed: the tunnel
+// is still up, so its next real drop must be reconnected rather than skipped
+// as the user's own doing.
+func TestManager_ClearUserDisconnect(t *testing.T) {
+	m := NewManager(DefaultConfig(), nil)
+	m.StoreConnectedProfile(&profile.Profile{Name: "work", AutoReconnect: true, AuthMethod: profile.AuthMethodCertificate})
+
+	m.SetUserDisconnect()
+	m.ClearUserDisconnect()
+
+	assert.True(t, m.ShouldReconnect(vpn.StateConnected, vpn.StateDisconnected))
+}
+
 func TestManager_StoreConnectedProfile(t *testing.T) {
 	m := NewManager(DefaultConfig(), nil)
 

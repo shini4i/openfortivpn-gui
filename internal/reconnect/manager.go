@@ -171,6 +171,15 @@ func (m *Manager) SetUserDisconnect() {
 	m.userInitiatedDisconnect = true
 }
 
+// ClearUserDisconnect withdraws a SetUserDisconnect whose disconnect failed.
+// The tunnel is still up, so its next drop must not be mistaken for the
+// user's own disconnect.
+func (m *Manager) ClearUserDisconnect() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.userInitiatedDisconnect = false
+}
+
 // StoreConnectedProfile stores a copy of the profile for potential reconnection.
 // The profile is copied to prevent issues if the original is modified.
 func (m *Manager) StoreConnectedProfile(p *profile.Profile) {

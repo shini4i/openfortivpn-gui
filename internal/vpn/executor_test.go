@@ -1,6 +1,7 @@
 package vpn
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -29,9 +30,7 @@ func TestDirectProcess_Kill_EscalatesToSigkill(t *testing.T) {
 
 	e := NewDirectExecutor()
 	// The shell traps SIGTERM and loops forever; only SIGKILL can stop it.
-	proc, err := e.CreateProcess(context.Background(), "sh", "-c", `trap "" TERM; while true; do sleep 0.1; done`)
-	require.NoError(t, err)
-	require.NoError(t, proc.Start())
+	proc := startTermIgnoringShell(t, e)
 
 	done := make(chan struct{})
 	go func() {
@@ -39,14 +38,36 @@ func TestDirectProcess_Kill_EscalatesToSigkill(t *testing.T) {
 		close(done)
 	}()
 
-	// Give the shell a moment to install the trap.
-	time.Sleep(200 * time.Millisecond)
-
 	require.NoError(t, proc.Kill())
 
 	select {
 	case <-done:
 		// Process died — escalation worked.
+	case <-time.After(5 * time.Second):
+		t.Fatal("process survived Kill: SIGTERM was ignored and no SIGKILL escalation happened")
+	}
+}
+
+// TestRealProcess_Kill_EscalatesToSigkill covers the pkexec executor's
+// same-user path, which signals the group directly the same way directProcess
+// does: a process that traps SIGTERM must still be killed, without pkexec.
+func TestRealProcess_Kill_EscalatesToSigkill(t *testing.T) {
+	oldGrace := sigtermGracePeriod
+	sigtermGracePeriod = 300 * time.Millisecond
+	defer func() { sigtermGracePeriod = oldGrace }()
+
+	proc := startTermIgnoringShell(t, NewRealExecutor())
+
+	done := make(chan struct{})
+	go func() {
+		_ = proc.Wait()
+		close(done)
+	}()
+
+	require.NoError(t, proc.Kill())
+
+	select {
+	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("process survived Kill: SIGTERM was ignored and no SIGKILL escalation happened")
 	}
@@ -176,4 +197,18 @@ func TestCmdWithPipes_StartFailureClosesPipes(t *testing.T) {
 
 	_, err = proc.Stderr().Read(make([]byte, 1))
 	assert.ErrorIs(t, err, os.ErrClosed, "stderr read end must be closed")
+}
+
+// startTermIgnoringShell starts a shell that ignores SIGTERM and returns once
+// the trap is installed, so a Kill test cannot pass on SIGTERM alone.
+func startTermIgnoringShell(t *testing.T, e ProcessExecutor) Process {
+	t.Helper()
+	proc, err := e.CreateProcess(context.Background(), "sh", "-c", `trap "" TERM; echo ready; while true; do sleep 0.1; done`)
+	require.NoError(t, err)
+	require.NoError(t, proc.Start())
+
+	line, err := bufio.NewReader(proc.Stdout()).ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "ready\n", line)
+	return proc
 }

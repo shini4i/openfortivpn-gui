@@ -159,7 +159,7 @@ func ValidAuthMethods() []AuthMethod {
 // validateHost validates that the host is a safe hostname or IP address.
 // This prevents command injection and other security issues.
 //
-// Security model: this is a strict ALLOWLIST. A host is either a parseable IP
+// Security model: this is a strict ALLOWLIST. A host is either a parseable IPv4
 // address or an RFC 1123 hostname whose labels contain only [A-Za-z0-9-].
 // Every shell metacharacter, quote, or whitespace byte is rejected by the
 // per-label character check below, so no separate blacklist is needed.
@@ -176,8 +176,13 @@ func validateHost(host string) error {
 		}
 	}
 
-	// Try to parse as IP address first
+	// Try to parse as IP address first. openfortivpn splits its host:port
+	// argument at the first colon, so any address containing one cannot be
+	// passed to it.
 	if net.ParseIP(host) != nil {
+		if strings.Contains(host, ":") {
+			return errors.New("invalid host: IPv6 addresses are not supported by openfortivpn; use a hostname or IPv4 address")
+		}
 		return nil
 	}
 

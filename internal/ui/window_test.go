@@ -640,9 +640,11 @@ func TestMainWindow_ShowError(t *testing.T) {
 // interface, so an unexpected call panics.
 type fakeController struct {
 	vpn.VPNController
-	state       vpn.ConnectionState
-	connects    int
-	disconnects int
+	state         vpn.ConnectionState
+	connects      int
+	disconnects   int
+	disconnectErr error
+	connectErr    error
 }
 
 func (f *fakeController) GetState() vpn.ConnectionState { return f.state }
@@ -651,11 +653,14 @@ func (f *fakeController) CanDisconnect() bool            { return f.state.CanDis
 
 func (f *fakeController) Connect(context.Context, *profile.Profile, *vpn.ConnectOptions) error {
 	f.connects++
-	return nil
+	return f.connectErr
 }
 
 func (f *fakeController) Disconnect(context.Context) error {
 	f.disconnects++
+	if f.disconnectErr != nil {
+		return f.disconnectErr
+	}
 	if !f.state.CanDisconnect() {
 		return errors.New("not connected: current state is " + string(f.state))
 	}
@@ -823,4 +828,100 @@ func trayState(tray *TrayIcon) vpn.ConnectionState {
 	tray.mu.RLock()
 	defer tray.mu.RUnlock()
 	return tray.state
+}
+
+// TestMainWindow_DisconnectAndAutoReconnect covers how a user disconnect
+// affects the next drop. A successful one must not be reconnected. A failed
+// one, such as a cancelled pkexec prompt, leaves the tunnel up, so its next
+// real drop must still be reconnected rather than skipped as the user's doing.
+func TestMainWindow_DisconnectAndAutoReconnect(t *testing.T) {
+	tests := []struct {
+		name          string
+		disconnectErr error
+		wantShown     []string
+		wantReconnect bool
+	}{
+		{name: "successful disconnect", wantReconnect: false},
+		{
+			name:          "failed disconnect",
+			disconnectErr: errors.New("authentication cancelled"),
+			wantShown:     []string{"authentication cancelled"},
+			wantReconnect: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := &fakeController{state: vpn.StateConnected, disconnectErr: tt.disconnectErr}
+			mgr := reconnect.NewManager(reconnect.DefaultConfig(), func(func()) {})
+			mgr.StoreConnectedProfile(&profile.Profile{Name: "work", AutoReconnect: true, AuthMethod: profile.AuthMethodCertificate})
+
+			var shown []string
+			w := &MainWindow{deps: &MainWindowDeps{VPNController: ctrl, ReconnectManager: mgr}}
+			w.presentError = func(_, message string) { shown = append(shown, message) }
+
+			w.disconnect()
+
+			assert.Equal(t, 1, ctrl.disconnects)
+			assert.Equal(t, tt.wantShown, shown)
+			assert.Equal(t, tt.wantReconnect, mgr.ShouldReconnect(vpn.StateConnected, vpn.StateDisconnected))
+		})
+	}
+}
+
+// TestMainWindow_DoConnectReleasesProfileOnRefusal covers a connect refused
+// before any state change, such as an unreachable helper daemon. Nothing will
+// release the profile later, so it must not keep naming the tray and alerts.
+func TestMainWindow_DoConnectReleasesProfileOnRefusal(t *testing.T) {
+	ctrl := &fakeController{state: vpn.StateDisconnected, connectErr: errors.New("helper daemon not available")}
+	var shown []string
+	w := &MainWindow{deps: &MainWindowDeps{VPNController: ctrl}, logDialog: &LogDialog{}}
+	w.presentError = func(_, message string) { shown = append(shown, message) }
+
+	w.doConnect(&profile.Profile{Name: "work"}, &vpn.ConnectOptions{})
+
+	assert.Nil(t, w.connectingProfile)
+	assert.Equal(t, []string{"helper daemon not available"}, shown)
+}
+
+// TestMainWindow_ActiveProfileName covers which profile the tray and
+// notifications name: the one being connected, not whichever profile the user
+// has since clicked in the sidebar.
+func TestMainWindow_ActiveProfileName(t *testing.T) {
+	work := &profile.Profile{Name: "work"}
+	home := &profile.Profile{Name: "home"}
+
+	tests := []struct {
+		name       string
+		connecting *profile.Profile
+		selected   *profile.Profile
+		want       string
+	}{
+		{name: "connecting profile wins over the selection", connecting: work, selected: home, want: "work"},
+		{name: "selection when nothing is connecting", selected: home, want: "home"},
+		{name: "nothing at all", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &MainWindow{connectingProfile: tt.connecting, selectedProfile: tt.selected}
+			assert.Equal(t, tt.want, w.activeProfileName())
+		})
+	}
+}
+
+// TestMainWindow_ReconnectGaveUp covers the end of a reconnect sequence that
+// produced no state change of its own, such as a password missing from the
+// keyring. The user must see why, and the tray must leave Reconnecting.
+func TestMainWindow_ReconnectGaveUp(t *testing.T) {
+	ctrl := &fakeController{state: vpn.StateDisconnected}
+	tray := NewTrayIcon()
+	tray.SetState(vpn.StateReconnecting)
+
+	var shown []string
+	w := &MainWindow{deps: &MainWindowDeps{VPNController: ctrl, Tray: tray}}
+	w.presentError = func(_, message string) { shown = append(shown, message) }
+
+	w.reconnectGaveUp(errors.New("password not available in keyring"))
+
+	assert.Equal(t, []string{"password not available in keyring"}, shown)
+	assert.Equal(t, vpn.StateDisconnected, trayState(tray))
 }

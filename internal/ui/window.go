@@ -62,9 +62,10 @@ type MainWindow struct {
 	// State
 	selectedProfile *profile.Profile
 
-	// connectingProfile is the profile whose connection is in flight. It
+	// connectingProfile is the profile whose connection is in flight or up. It
 	// identifies whose stored password to discard when the gateway rejects the
-	// credentials, since error events carry no profile of their own.
+	// credentials, since error events carry no profile of their own, and which
+	// profile the tray and notifications name.
 	connectingProfile *profile.Profile
 
 	// connection counts the connections started from this window. Callbacks
@@ -120,8 +121,12 @@ func (w *MainWindow) setupWindow(app *adw.Application) {
 	w.window.SetTitle("OpenFortiVPN")
 	w.window.SetDefaultSize(windowDefaultWidth, windowDefaultHeight)
 
-	// Handle window close: hide instead of quit (app stays in tray)
+	// Handle window close: hide instead of quit, so the app stays in the tray.
+	// With no tray the window closes normally, and the app quits with it.
 	w.window.ConnectCloseRequest(func() bool {
+		if w.deps.Tray == nil {
+			return false
+		}
 		// Use IdleAdd to ensure hide happens on GTK main thread
 		glib.IdleAdd(func() {
 			w.window.SetVisible(false)
@@ -265,8 +270,9 @@ func (w *MainWindow) setupCallbacks() {
 		w.selectedProfile = p
 		w.profileEditor.SetProfile(p)
 		w.updateStatusForProfile(p)
-		// Update tray to show which profile will be connected
-		if w.deps.Tray != nil && p != nil {
+		// Update tray to show which profile will be connected. While a
+		// connection is in flight the tray names that profile instead.
+		if w.deps.Tray != nil && p != nil && w.connectingProfile == nil {
 			w.deps.Tray.SetProfileName(p.Name)
 		}
 	})
@@ -322,6 +328,9 @@ func (w *MainWindow) handleStateChange(oldState, newState vpn.ConnectionState) {
 			return
 		}
 
+		// Read before the release below, which forgets the profile once the
+		// connection ends — the notification for that end still names it.
+		profileName := w.activeProfileName()
 		w.releaseConnectingProfile(newState)
 
 		// Reset reconnect state on successful connection
@@ -342,17 +351,12 @@ func (w *MainWindow) handleStateChange(oldState, newState vpn.ConnectionState) {
 		// Update connect button state
 		w.updateConnectButton(displayState)
 
-		// Get profile name for notifications
-		profileName := ""
-		if w.selectedProfile != nil {
-			profileName = w.selectedProfile.Name
-		}
-
-		// Update tray
+		// Update tray. Read after the release: once the connection ends, the
+		// tray's Connect item names the profile Connect would now use.
 		if w.deps.Tray != nil {
 			w.deps.Tray.SetState(displayState)
-			if profileName != "" {
-				w.deps.Tray.SetProfileName(profileName)
+			if trayName := w.activeProfileName(); trayName != "" {
+				w.deps.Tray.SetProfileName(trayName)
 			}
 		}
 
@@ -411,6 +415,20 @@ func (w *MainWindow) countConnection(newState vpn.ConnectionState) {
 	if newState == vpn.StateConnecting {
 		w.connection.begin()
 	}
+}
+
+// activeProfileName names the profile the tray and notifications should
+// report: the one being connected, falling back to the sidebar selection when
+// no connection was started from this window (a tunnel the helper daemon
+// already had up at startup). Empty when there is neither.
+func (w *MainWindow) activeProfileName() string {
+	if w.connectingProfile != nil {
+		return w.connectingProfile.Name
+	}
+	if w.selectedProfile != nil {
+		return w.selectedProfile.Name
+	}
+	return ""
 }
 
 // releaseConnectingProfile forgets the in-flight profile once its attempt has
@@ -885,6 +903,8 @@ func (w *MainWindow) doConnect(p *profile.Profile, opts *vpn.ConnectOptions) {
 	}
 
 	if err := w.deps.VPNController.Connect(ctx, p, opts); err != nil {
+		// A refused connect may raise no terminal state to release the profile.
+		w.connectingProfile = nil
 		w.showError("Connection Error", err.Error())
 	}
 }
@@ -899,6 +919,10 @@ func (w *MainWindow) disconnect() {
 	}
 
 	if err := w.deps.VPNController.Disconnect(context.Background()); err != nil {
+		// The tunnel is still up, so its next drop is not the user's doing.
+		if w.deps.ReconnectManager != nil {
+			w.deps.ReconnectManager.ClearUserDisconnect()
+		}
 		w.showError("Disconnect Error", err.Error())
 	}
 }
@@ -947,8 +971,11 @@ func (w *MainWindow) showError(title, message string) {
 	w.presentError(title, message)
 }
 
-// showErrorDialog presents a modal error dialog with a single OK response.
+// showErrorDialog presents a modal error dialog with a single OK response. The
+// window is shown first: in tray-only mode it is hidden, and a dialog on a
+// hidden window displays nothing (see ensureWindowVisible).
 func (w *MainWindow) showErrorDialog(title, message string) {
+	w.ensureWindowVisible()
 	dialog := adw.NewAlertDialog(title, message)
 	dialog.AddResponse("ok", "OK")
 	dialog.SetDefaultResponse("ok")
@@ -1027,6 +1054,14 @@ func (w *MainWindow) reconnectWaiting() bool {
 func (w *MainWindow) stopReconnect() {
 	w.deps.ReconnectManager.Cancel()
 	w.showActualState()
+}
+
+// reconnectGaveUp reports a reconnect sequence that stopped without a state
+// change of its own, such as a password missing from the keyring: it says why
+// and replaces the Reconnecting display. Must run on the GTK main thread.
+func (w *MainWindow) reconnectGaveUp(err error) {
+	w.showActualState()
+	w.showError("Reconnect Failed", err.Error())
 }
 
 // showActualState shows the controller's own state in the status display, the

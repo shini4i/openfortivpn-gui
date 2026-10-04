@@ -3,7 +3,9 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -94,6 +96,10 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	if problems := cfg.resetInvalidFields(); len(problems) > 0 {
+		slog.Warn("Replaced invalid config values with defaults", "path", path, "problems", problems)
+	}
+
 	return cfg, nil
 }
 
@@ -111,21 +117,56 @@ func Save(path string, cfg *Config) error {
 	return nil
 }
 
-// Validate checks if the configuration is valid.
+// fieldRules lists every rule Validate enforces. Load uses the same list to
+// replace a hand-edited invalid value with its default, so the two cannot drift.
+var fieldRules = []struct {
+	invalid func(c *Config) bool
+	reset   func(c, defaults *Config)
+	message string
+}{
+	{
+		invalid: func(c *Config) bool { return c.ReconnectDelaySeconds < 0 },
+		reset:   func(c, d *Config) { c.ReconnectDelaySeconds = d.ReconnectDelaySeconds },
+		message: "reconnect delay must be non-negative",
+	},
+	{
+		invalid: func(c *Config) bool { return c.MaxReconnectAttempts < 0 },
+		reset:   func(c, d *Config) { c.MaxReconnectAttempts = d.MaxReconnectAttempts },
+		message: "max reconnect attempts must be non-negative",
+	},
+	{
+		// Resolution happens once at startup in app.go, which falls back to a
+		// PATH lookup and only warns when the binary cannot be found at all.
+		invalid: func(c *Config) bool { return c.OpenFortiVPNPath == "" },
+		reset:   func(c, d *Config) { c.OpenFortiVPNPath = d.OpenFortiVPNPath },
+		message: "openfortivpn path must not be empty",
+	},
+}
+
+// Validate checks if the configuration is valid, returning the first rule it
+// breaks.
 func (c *Config) Validate() error {
-	if c.ReconnectDelaySeconds < 0 {
-		return fmt.Errorf("reconnect delay must be non-negative")
-	}
-	if c.MaxReconnectAttempts < 0 {
-		return fmt.Errorf("max reconnect attempts must be non-negative")
-	}
-	// OpenFortiVPNPath must be non-empty at config level. Resolution happens
-	// once at startup in app.go, which falls back to a PATH lookup and only
-	// warns when the binary cannot be found at all.
-	if c.OpenFortiVPNPath == "" {
-		return fmt.Errorf("openfortivpn path must not be empty")
+	for _, rule := range fieldRules {
+		if rule.invalid(c) {
+			return errors.New(rule.message)
+		}
 	}
 	return nil
+}
+
+// resetInvalidFields replaces every value Validate would reject with its
+// default and returns the rules that were broken. Without it, one bad value
+// in a hand-edited file makes every later UpdateField fail validation.
+func (c *Config) resetInvalidFields() []string {
+	defaults := DefaultConfig()
+	var problems []string
+	for _, rule := range fieldRules {
+		if rule.invalid(c) {
+			rule.reset(c, defaults)
+			problems = append(problems, rule.message)
+		}
+	}
+	return problems
 }
 
 // Manager provides high-level configuration management.

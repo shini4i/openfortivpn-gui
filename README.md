@@ -110,7 +110,7 @@ Set `OPENFORTIVPN_GUI_DEBUG=1` for debug logging (the helper daemon also accepts
 
 ### System Tray
 
-Tray integration uses the [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/) (SNI) D-Bus protocol — the cross-desktop standard supported by KDE Plasma, XFCE, Waybar, and most panels. On startup the app probes D-Bus for a registered SNI host: if one is found and at least one profile exists, it starts minimized to tray; otherwise the main window is presented so the UI is never unreachable.
+Tray integration uses the [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/) (SNI) D-Bus protocol — the cross-desktop standard supported by KDE Plasma, XFCE, Waybar, and most panels. On startup the app probes D-Bus for a registered SNI host: if one is found and at least one profile exists, it starts minimized to tray; otherwise the main window is presented so the UI is never unreachable. With a tray, closing the window hides it; without one, closing the window quits the app.
 
 Two environments need extra setup for tray mode:
 

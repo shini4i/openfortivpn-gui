@@ -54,6 +54,9 @@ type App struct {
 	// Application-level context for VPN operations
 	ctx       context.Context
 	ctxCancel context.CancelFunc
+
+	// activated is set by the first activation, so startup runs only once.
+	activated bool
 }
 
 // AppConfig holds configuration for creating a new App instance.
@@ -164,10 +167,16 @@ func (a *App) Run(args []string) int {
 	return a.app.Run(args)
 }
 
-// onActivate is called when the application is activated.
-// If profiles exist and a system tray is supported, the app starts in tray-only mode (window hidden).
-// The window is always created to ensure VPN callbacks are registered.
+// onActivate starts the app, in tray-only mode (window hidden) when a tray and
+// profiles exist. GApplication activates the running instance again on every
+// later launch; those activations only present the window.
 func (a *App) onActivate() {
+	if a.activated {
+		a.window.Present()
+		return
+	}
+	a.activated = true
+
 	// register application actions
 	a.registerActions()
 
@@ -175,8 +184,13 @@ func (a *App) onActivate() {
 	a.ensureNotifier()
 	hasTray := a.ensureTray()
 
+	// Created even when hidden, so the VPN callbacks are registered.
 	a.ensureWindow()
-	a.app.Hold()
+	// Only the tray needs the app to outlive its window. Without one, closing
+	// the window quits (see setupWindow) instead of leaving an invisible process.
+	if hasTray {
+		a.app.Hold()
+	}
 
 	hasProfiles := a.hasProfiles()
 	if hasProfiles {
@@ -348,12 +362,16 @@ func (a *App) ShowPreferencesDialog() {
 	prefs.Present()
 }
 
-// updateConfigField atomically updates a single config field and persists the change.
-// The mutator function receives the current config and should modify the desired field.
-// This uses UpdateField to avoid read-modify-write race conditions.
+// updateConfigField applies mutator to the config through UpdateField, which
+// avoids read-modify-write races, and persists it. A failure is shown to the
+// user, or the setting would revert on restart unannounced. Must run on the
+// GTK main thread.
 func (a *App) updateConfigField(mutator func(cfg *config.Config)) {
 	if err := a.configManager.UpdateField(mutator); err != nil {
 		slog.Error("Failed to persist config change", "error", err)
+		if a.window != nil {
+			a.window.showError("Error Saving Settings", err.Error())
+		}
 	}
 }
 
@@ -527,19 +545,25 @@ func (a *App) ensureWindow() {
 				a.window.connectingProfile = p
 			}
 			opts := &vpn.ConnectOptions{Password: password}
-			return a.vpnController.Connect(ctx, p, opts)
+			err := a.vpnController.Connect(ctx, p, opts)
+			// As in doConnect: a refusal may raise no state change to release it.
+			if err != nil && a.window != nil {
+				a.window.connectingProfile = nil
+			}
+			return err
 		})
 		reconnectManager.SetCallbacks(reconnect.Callbacks{
 			OnReconnecting: func() {
 				// Callbacks are handled by state change handler in window.go
 			},
 			OnFailed: func(err error) {
-				// Reconnecting has stopped, so show where the tunnel actually
-				// ended up. Read on the main thread: a connection started in
-				// the meantime must not be overwritten with a stale state.
+				// Reconnecting has stopped, so say why and show where the
+				// tunnel actually ended up. Read on the main thread: a
+				// connection started in the meantime must not be overwritten
+				// with a stale state.
 				glib.IdleAdd(func() {
 					if a.window != nil {
-						a.window.showActualState()
+						a.window.reconnectGaveUp(err)
 					}
 				})
 			},
