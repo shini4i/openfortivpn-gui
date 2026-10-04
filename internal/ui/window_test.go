@@ -545,9 +545,9 @@ func (f *fakeProfileStore) Save(p *profile.Profile) error {
 	return nil
 }
 
-// TestMainWindow_SaveProfile covers the sequence both persistence paths share:
-// the store write, the orphaned-password cleanup that depends on the auth
-// method as last saved, and the report of whether the profile is new.
+// TestMainWindow_SaveProfile covers the store write persistProfile wraps: the
+// orphaned-password cleanup that depends on the auth method as last saved, and
+// the report of whether the profile is new.
 func TestMainWindow_SaveProfile(t *testing.T) {
 	const profileID = "3f8a1c6e-1d2b-4c9a-8e7f-0a1b2c3d4e5f"
 
@@ -750,6 +750,71 @@ func TestMainWindow_ConnectionControlWithoutReconnect(t *testing.T) {
 
 		assert.Equal(t, 1, ctrl.disconnects)
 		assert.Zero(t, ctrl.connects)
+	})
+}
+
+// TestMainWindow_PersistProfile covers the save step shared by the Save button
+// and Connect: a profile the list does not track yet must be added to it, or a
+// new profile connected before its first Save never appears in the sidebar.
+func TestMainWindow_PersistProfile(t *testing.T) {
+	const profileID = "3f8a1c6e-1d2b-4c9a-8e7f-0a1b2c3d4e5f"
+
+	type shownProfile struct {
+		id    string
+		isNew bool
+	}
+
+	newWindow := func(store profile.StoreInterface, tracked *profile.Profile) (*MainWindow, *[]shownProfile) {
+		w := &MainWindow{
+			deps:        &MainWindowDeps{ProfileStore: store, KeyringStore: &fakeKeyring{}},
+			profileList: &ProfileList{profileMap: map[string]*profileRow{}},
+		}
+		if tracked != nil {
+			w.profileList.profileMap[tracked.ID] = &profileRow{profile: tracked}
+		}
+		var shown []shownProfile
+		w.showSavedProfile = func(p *profile.Profile, isNew bool) {
+			shown = append(shown, shownProfile{id: p.ID, isNew: isNew})
+		}
+		return w, &shown
+	}
+
+	t.Run("a new profile is added to the list", func(t *testing.T) {
+		store := &fakeProfileStore{}
+		w, shown := newWindow(store, nil)
+		p := &profile.Profile{ID: profileID}
+
+		err := w.persistProfile(p)
+
+		assert.NoError(t, err)
+		assert.Equal(t, []string{profileID}, store.saved)
+		assert.Equal(t, []shownProfile{{id: profileID, isNew: true}}, *shown)
+		assert.Same(t, p, w.selectedProfile)
+	})
+
+	t.Run("a tracked profile is updated in place", func(t *testing.T) {
+		store := &fakeProfileStore{}
+		w, shown := newWindow(store, &profile.Profile{ID: profileID})
+		p := &profile.Profile{ID: profileID, Name: "renamed"}
+
+		err := w.persistProfile(p)
+
+		assert.NoError(t, err)
+		assert.Equal(t, []string{profileID}, store.saved)
+		assert.Equal(t, []shownProfile{{id: profileID, isNew: false}}, *shown)
+		assert.Same(t, p, w.selectedProfile)
+	})
+
+	t.Run("a failed save leaves the list and selection alone", func(t *testing.T) {
+		w, shown := newWindow(&fakeProfileStore{saveErr: errors.New("disk full")}, nil)
+		previous := &profile.Profile{ID: profileID}
+		w.selectedProfile = previous
+
+		err := w.persistProfile(&profile.Profile{ID: profileID})
+
+		assert.EqualError(t, err, "disk full")
+		assert.Empty(t, *shown)
+		assert.Same(t, previous, w.selectedProfile)
 	})
 }
 

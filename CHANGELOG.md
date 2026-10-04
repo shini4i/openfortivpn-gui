@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The window button used to start a new connection instead. The tray item
   showed a "not connected" error and left "Reconnecting" on screen. The
   button also no longer reads "Disconnect" after reconnecting gives up.
+- A new profile connected before its first Save now appears in the profile
+  list. It used to be saved but stay hidden until the application restarted,
+  so it could not be selected or deleted.
 
 ## [0.4.2] - 2026-09-14
 
