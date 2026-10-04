@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 
 	"github.com/shini4i/openfortivpn-gui/internal/keyring"
 	"github.com/shini4i/openfortivpn-gui/internal/profile"
+	"github.com/shini4i/openfortivpn-gui/internal/reconnect"
 	"github.com/shini4i/openfortivpn-gui/internal/vpn"
 )
 
@@ -631,4 +633,129 @@ func TestMainWindow_ShowError(t *testing.T) {
 
 		assert.Equal(t, []string{"profile directory is read-only"}, shown)
 	})
+}
+
+// fakeController reports a fixed state and counts Connect and Disconnect
+// calls. Methods the window tests never reach are left to the embedded nil
+// interface, so an unexpected call panics.
+type fakeController struct {
+	vpn.VPNController
+	state       vpn.ConnectionState
+	connects    int
+	disconnects int
+}
+
+func (f *fakeController) GetState() vpn.ConnectionState { return f.state }
+func (f *fakeController) CanConnect() bool               { return f.state.CanConnect() }
+func (f *fakeController) CanDisconnect() bool            { return f.state.CanDisconnect() }
+
+func (f *fakeController) Connect(context.Context, *profile.Profile, *vpn.ConnectOptions) error {
+	f.connects++
+	return nil
+}
+
+func (f *fakeController) Disconnect(context.Context) error {
+	f.disconnects++
+	if !f.state.CanDisconnect() {
+		return errors.New("not connected: current state is " + string(f.state))
+	}
+	return nil
+}
+
+// TestMainWindow_ConnectionControlDuringReconnectWait covers the wait between
+// reconnect attempts: the window offers Disconnect while the controller is already
+// Disconnected or Failed. Activating it must cancel the pending reconnect, not
+// connect or ask a controller with nothing to stop to disconnect.
+func TestMainWindow_ConnectionControlDuringReconnectWait(t *testing.T) {
+	const profileID = "3f8a1c6e-1d2b-4c9a-8e7f-0a1b2c3d4e5f"
+
+	// newWindow arms a reconnect whose timer cannot fire during the test.
+	newWindow := func(state vpn.ConnectionState) (*MainWindow, *fakeController, *reconnect.Manager, *[]string) {
+		ctrl := &fakeController{state: state}
+		mgr := reconnect.NewManager(reconnect.Config{MaxAttempts: 3, DelaySeconds: 3600}, func(func()) {})
+		mgr.StoreConnectedProfile(&profile.Profile{ID: profileID, Name: "work", AutoReconnect: true})
+		mgr.StartReconnect()
+		t.Cleanup(mgr.Cancel)
+
+		tray := NewTrayIcon()
+		tray.SetState(vpn.StateReconnecting)
+
+		var shown []string
+		w := &MainWindow{deps: &MainWindowDeps{VPNController: ctrl, ReconnectManager: mgr, Tray: tray}}
+		w.presentError = func(_, message string) { shown = append(shown, message) }
+		return w, ctrl, mgr, &shown
+	}
+
+	for _, state := range []vpn.ConnectionState{vpn.StateDisconnected, vpn.StateFailed} {
+		t.Run("window button while the controller is "+string(state), func(t *testing.T) {
+			w, ctrl, mgr, shown := newWindow(state)
+
+			w.onConnectClicked()
+
+			assert.Zero(t, ctrl.connects, "a Disconnect click must not start a connection")
+			assert.Zero(t, ctrl.disconnects, "the controller has nothing to disconnect")
+			assert.Zero(t, mgr.GetAttemptCount(), "the pending reconnect must be cancelled")
+			assert.Equal(t, state, trayState(w.deps.Tray), "the tray must stop showing Reconnecting")
+			assert.Empty(t, *shown)
+		})
+
+		t.Run("tray Disconnect while the controller is "+string(state), func(t *testing.T) {
+			w, ctrl, mgr, shown := newWindow(state)
+
+			w.triggerDisconnect()
+
+			assert.Zero(t, ctrl.connects)
+			assert.Zero(t, ctrl.disconnects, "the controller has nothing to disconnect")
+			assert.Zero(t, mgr.GetAttemptCount(), "the pending reconnect must be cancelled")
+			assert.Equal(t, state, trayState(w.deps.Tray), "the tray must stop showing Reconnecting")
+			assert.Empty(t, *shown, "stopping a reconnect is not an error")
+		})
+	}
+
+	t.Run("a reconnect attempt in progress is disconnected", func(t *testing.T) {
+		w, ctrl, mgr, shown := newWindow(vpn.StateConnecting)
+
+		w.onConnectClicked()
+
+		assert.Equal(t, 1, ctrl.disconnects, "the running attempt has a process to stop")
+		assert.Zero(t, ctrl.connects)
+		assert.Zero(t, mgr.GetAttemptCount())
+		assert.Empty(t, *shown)
+	})
+}
+
+// TestMainWindow_ConnectionControlWithoutReconnect keeps the ordinary paths
+// intact: with no reconnect pending, the control follows the controller.
+func TestMainWindow_ConnectionControlWithoutReconnect(t *testing.T) {
+	t.Run("disconnected connects", func(t *testing.T) {
+		ctrl := &fakeController{state: vpn.StateDisconnected}
+		var shown []string
+		w := &MainWindow{deps: &MainWindowDeps{VPNController: ctrl}}
+		w.presentError = func(_, message string) { shown = append(shown, message) }
+
+		w.onConnectClicked()
+
+		// connect() bails out on the missing selection, which proves the
+		// connect path ran without needing GTK widgets.
+		assert.Equal(t, []string{"Please select a profile to connect."}, shown)
+		assert.Zero(t, ctrl.disconnects)
+	})
+
+	t.Run("connected disconnects", func(t *testing.T) {
+		ctrl := &fakeController{state: vpn.StateConnected}
+		w := &MainWindow{deps: &MainWindowDeps{VPNController: ctrl}}
+		w.presentError = func(string, string) {}
+
+		w.onConnectClicked()
+
+		assert.Equal(t, 1, ctrl.disconnects)
+		assert.Zero(t, ctrl.connects)
+	})
+}
+
+// trayState reads the state the tray currently displays.
+func trayState(tray *TrayIcon) vpn.ConnectionState {
+	tray.mu.RLock()
+	defer tray.mu.RUnlock()
+	return tray.state
 }

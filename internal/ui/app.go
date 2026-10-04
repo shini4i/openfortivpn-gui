@@ -538,12 +538,8 @@ func (a *App) ensureWindow() {
 				// ended up. Read on the main thread: a connection started in
 				// the meantime must not be overwritten with a stale state.
 				glib.IdleAdd(func() {
-					state := a.vpnController.GetState()
 					if a.window != nil {
-						a.window.statusDisplay.SetState(state)
-					}
-					if a.tray != nil {
-						a.tray.SetState(state)
+						a.window.showActualState()
 					}
 				})
 			},

@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated the GTK4 bindings to gotk4 v0.4.1, which reworks GObject reference
   tracking and finalizer cleanup upstream.
 
+### Fixed
+
+- Pressing Disconnect while waiting to reconnect now stops reconnecting.
+  The window button used to start a new connection instead. The tray item
+  showed a "not connected" error and left "Reconnecting" on screen. The
+  button also no longer reads "Disconnect" after reconnecting gives up.
+
 ## [0.4.2] - 2026-09-14
 
 ### Fixed
