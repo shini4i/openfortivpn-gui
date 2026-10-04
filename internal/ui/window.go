@@ -696,8 +696,14 @@ func (w *MainWindow) forgetSavedPassword(p *profile.Profile) {
 	slog.Info("Forgot saved password; the next connection will prompt again", "profile_id", p.ID)
 }
 
-// onConnectClicked handles the connect/disconnect button click.
+// onConnectClicked handles the connect/disconnect button click. While a
+// reconnect is waiting the button reads Disconnect, so it cancels the reconnect.
 func (w *MainWindow) onConnectClicked() {
+	if w.reconnectWaiting() {
+		w.stopReconnect()
+		return
+	}
+
 	state := w.deps.VPNController.GetState()
 
 	if state.CanDisconnect() {
@@ -894,9 +900,9 @@ func (w *MainWindow) updateStatusForProfile(p *profile.Profile) {
 
 // updateConnectButton updates the connect button based on VPN state.
 //
-// The caller (handleStateChange) already runs on the GTK main thread, so the
-// button is mutated directly to keep it in sync with the rest of the
-// state-change update rather than deferring it to a separate idle cycle.
+// Callers (handleStateChange, showActualState) already run on the GTK main
+// thread, so the button is mutated directly to keep it in sync with the rest
+// of the display update rather than deferring it to a separate idle cycle.
 func (w *MainWindow) updateConnectButton(state vpn.ConnectionState) {
 	if w.connectButton == nil {
 		return
@@ -982,9 +988,45 @@ func (w *MainWindow) triggerConnect() {
 	w.connect()
 }
 
-// triggerDisconnect terminates the VPN connection from external sources (e.g., system tray).
+// triggerDisconnect terminates the VPN connection from external sources (e.g.,
+// system tray), or cancels a reconnect that is waiting for its next attempt.
 func (w *MainWindow) triggerDisconnect() {
+	if w.reconnectWaiting() {
+		w.stopReconnect()
+		return
+	}
 	w.disconnect()
+}
+
+// reconnectWaiting reports whether a reconnect sequence is between attempts.
+// The window then shows Reconnecting, but the controller is Disconnected or
+// Failed and has no process for Disconnect to stop.
+func (w *MainWindow) reconnectWaiting() bool {
+	return w.deps.ReconnectManager != nil &&
+		w.deps.ReconnectManager.GetAttemptCount() > 0 &&
+		!w.deps.VPNController.CanDisconnect()
+}
+
+// stopReconnect cancels the pending reconnect and shows the state the tunnel is
+// really in. No state change follows a cancel, so nothing else would replace
+// the Reconnecting display.
+func (w *MainWindow) stopReconnect() {
+	w.deps.ReconnectManager.Cancel()
+	w.showActualState()
+}
+
+// showActualState shows the controller's own state in the status display, the
+// connect button and the tray, replacing a Reconnecting display. Must run on
+// the GTK main thread.
+func (w *MainWindow) showActualState() {
+	state := w.deps.VPNController.GetState()
+	if w.statusDisplay != nil {
+		w.statusDisplay.SetState(state)
+	}
+	w.updateConnectButton(state)
+	if w.deps.Tray != nil {
+		w.deps.Tray.SetState(state)
+	}
 }
 
 // selectProfileByID selects the profile with the given ID.
