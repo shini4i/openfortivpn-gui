@@ -544,3 +544,29 @@ func TestManager_UpdateField(t *testing.T) {
 		assert.Equal(t, "test-profile-123", loaded.DefaultProfileID)
 	})
 }
+
+// TestLoad_ReplacesInvalidValues covers a hand-edited config.json holding
+// values Validate rejects. Load must swap them for defaults and keep the rest,
+// or every later UpdateField fails validation and no setting can be saved.
+func TestLoad_ReplacesInvalidValues(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	content := `{
+		"default_profile_id": "kept",
+		"reconnect_delay_seconds": -1,
+		"max_reconnect_attempts": -2,
+		"show_notifications": false,
+		"openfortivpn_path": ""
+	}`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+
+	defaults := DefaultConfig()
+	assert.Equal(t, defaults.ReconnectDelaySeconds, cfg.ReconnectDelaySeconds)
+	assert.Equal(t, defaults.MaxReconnectAttempts, cfg.MaxReconnectAttempts)
+	assert.Equal(t, defaults.OpenFortiVPNPath, cfg.OpenFortiVPNPath)
+	assert.Equal(t, "kept", cfg.DefaultProfileID, "valid values must survive")
+	assert.False(t, cfg.ShowNotifications, "valid values must survive")
+	assert.NoError(t, cfg.Validate())
+}

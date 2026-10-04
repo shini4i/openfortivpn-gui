@@ -264,7 +264,7 @@ func TestProfile_Validate(t *testing.T) {
 			wantErr: "invalid host: contains control characters",
 		},
 		{
-			name: "valid host - IPv6 address",
+			name: "invalid host - IPv6 address",
 			profile: &Profile{
 				ID:         "550e8400-e29b-41d4-a716-446655440000",
 				Name:       "Work VPN",
@@ -273,7 +273,19 @@ func TestProfile_Validate(t *testing.T) {
 				AuthMethod: AuthMethodPassword,
 				Username:   "john.doe",
 			},
-			wantErr: "",
+			wantErr: "invalid host: IPv6 addresses are not supported",
+		},
+		{
+			name: "invalid host - IPv4-mapped IPv6 address",
+			profile: &Profile{
+				ID:         "550e8400-e29b-41d4-a716-446655440000",
+				Name:       "Work VPN",
+				Host:       "::ffff:192.0.2.1",
+				Port:       443,
+				AuthMethod: AuthMethodPassword,
+				Username:   "john.doe",
+			},
+			wantErr: "invalid host: IPv6 addresses are not supported",
 		},
 		{
 			name: "invalid host - hostname too long",

@@ -2,6 +2,7 @@ package vpn
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -210,26 +211,13 @@ func (p *realProcess) Kill() error {
 
 	pgid := p.cmd.Process.Pid
 
-	// First try sending SIGTERM to the entire process group directly.
-	// This works if the process is running as the same user.
-	// Using negative pgid kills all processes in the group.
-	switch err := syscall.Kill(-pgid, syscall.SIGTERM); err {
-	case nil:
-		if waitForProcessGroupExit(pgid, sigtermGracePeriod) {
-			return nil
-		}
-		// Delivered but ignored. The group runs as our user, so we can
-		// escalate directly without pkexec.
-		if killErr := syscall.Kill(-pgid, syscall.SIGKILL); killErr != nil && killErr != syscall.ESRCH {
-			return fmt.Errorf("failed to kill process group: %w", killErr)
-		}
-		return nil
-	case syscall.ESRCH:
-		// Process/group already terminated - nothing to do
-		return nil
+	// Signal the group directly first. This works if it runs as our user;
+	// EPERM means it runs as root (via pkexec), so pkexec must send the signals.
+	if err := signalGroupGracefully(pgid); !errors.Is(err, syscall.EPERM) {
+		return err
 	}
 
-	// Process group is likely running as root (via pkexec).
+	// Process group is running as root (via pkexec).
 	// Use pkexec to send SIGTERM to the process group.
 	// The "--" ensures negative numbers aren't treated as options.
 	// #nosec G204 -- pgid is the child's own PID (== PGID via Setpgid), not user input
@@ -309,24 +297,29 @@ func (p *directProcess) Kill() error {
 		return nil
 	}
 
-	pgid := p.cmd.Process.Pid
+	return signalGroupGracefully(p.cmd.Process.Pid)
+}
 
-	// Send SIGTERM to the entire process group.
-	// Using negative pgid kills all processes in the group.
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err == syscall.ESRCH {
-		// Process/group already terminated - nothing to do
+// signalGroupGracefully sends SIGTERM to process group pgid, waits up to
+// sigtermGracePeriod for it to exit, then escalates to SIGKILL. A group that
+// is already gone is not an error. Errors wrap the syscall error, so callers
+// can test for EPERM with errors.Is.
+func signalGroupGracefully(pgid int) error {
+	// Negative pgid targets every process in the group.
+	switch err := syscall.Kill(-pgid, syscall.SIGTERM); err {
+	case nil:
+	case syscall.ESRCH:
 		return nil
-	} else if err == nil && waitForProcessGroupExit(pgid, sigtermGracePeriod) {
+	default:
+		return fmt.Errorf("failed to signal process group: %w", err)
+	}
+
+	if waitForProcessGroupExit(pgid, sigtermGracePeriod) {
 		return nil
 	}
 
-	// SIGTERM failed or was ignored, use SIGKILL as last resort.
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-		if err == syscall.ESRCH {
-			return nil
-		}
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 		return fmt.Errorf("failed to kill process group: %w", err)
 	}
-
 	return nil
 }

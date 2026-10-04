@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Building from source now requires Go 1.27 or newer.
 - Updated the GTK4 bindings to gotk4 v0.4.1, which reworks GObject reference
   tracking and finalizer cleanup upstream.
+- IPv6 addresses are no longer accepted as the gateway host. openfortivpn
+  cannot connect to one, so such a profile always failed. Use a hostname or
+  an IPv4 address instead.
 
 ### Fixed
 
@@ -22,6 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A new profile connected before its first Save now appears in the profile
   list. It used to be saved but stay hidden until the application restarted,
   so it could not be selected or deleted.
+- Launching the application while it is already running now just shows its
+  window. It used to re-run startup, which retried auto-connect on a live
+  connection and cleared the connection log.
+- Error messages now appear when the application runs from the tray alone.
+  They were shown on the hidden window, so failures looked silent.
+- When automatic reconnection stops early, for example because the saved
+  password is missing, the reason is now shown.
+- A disconnect that fails, such as a cancelled authentication prompt, no
+  longer turns off automatic reconnection for that tunnel's next drop.
+- The tray and notifications now name the profile being connected, not
+  whichever profile is selected in the sidebar.
+- A setting in `config.json` that the application rejects no longer stops
+  every other setting from being saved. The rejected value is replaced with
+  its default, and a settings change that cannot be saved is now reported.
+- Without a system tray, closing the window now quits the application. It
+  used to keep running with no window, no tray icon and no way to quit it.
 
 ## [0.4.2] - 2026-09-14
 
