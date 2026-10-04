@@ -558,14 +558,11 @@ func (a *App) ensureWindow() {
 			},
 			OnFailed: func(err error) {
 				// Reconnecting has stopped, so say why and show where the
-				// tunnel actually ended up. Read on the main thread: a
-				// connection started in the meantime must not be overwritten
-				// with a stale state.
-				glib.IdleAdd(func() {
-					if a.window != nil {
-						a.window.reconnectGaveUp(err)
-					}
-				})
+				// tunnel actually ended up. The window marshals this to the
+				// main thread and drops it if a newer connection has started.
+				if a.window != nil {
+					a.window.handleReconnectGaveUp(err)
+				}
 			},
 		})
 

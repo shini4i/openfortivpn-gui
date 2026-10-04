@@ -908,6 +908,42 @@ func TestMainWindow_ActiveProfileName(t *testing.T) {
 	}
 }
 
+// TestMainWindow_HandleReconnectGaveUp_DropsSupersededConnection covers a
+// connection started after a reconnect gave up but before the main loop ran
+// the report: the old sequence's failure must not interrupt the new one.
+func TestMainWindow_HandleReconnectGaveUp_DropsSupersededConnection(t *testing.T) {
+	newWindow := func(shown *[]string) *MainWindow {
+		w := &MainWindow{
+			deps:           &MainWindowDeps{VPNController: &fakeController{state: vpn.StateDisconnected}},
+			scheduleOnMain: func(fn func()) { fn() },
+		}
+		w.presentError = func(_, message string) { *shown = append(*shown, message) }
+		return w
+	}
+
+	t.Run("a connection started in between drops the report", func(t *testing.T) {
+		var shown []string
+		w := newWindow(&shown)
+		w.scheduleOnMain = func(fn func()) {
+			w.connection.begin()
+			fn()
+		}
+
+		w.handleReconnectGaveUp(errors.New("password not available in keyring"))
+
+		assert.Empty(t, shown)
+	})
+
+	t.Run("the report is shown when nothing has started since", func(t *testing.T) {
+		var shown []string
+		w := newWindow(&shown)
+
+		w.handleReconnectGaveUp(errors.New("password not available in keyring"))
+
+		assert.Equal(t, []string{"password not available in keyring"}, shown)
+	})
+}
+
 // TestMainWindow_ReconnectGaveUp covers the end of a reconnect sequence that
 // produced no state change of its own, such as a password missing from the
 // keyring. The user must see why, and the tray must leave Reconnecting.

@@ -1056,6 +1056,20 @@ func (w *MainWindow) stopReconnect() {
 	w.showActualState()
 }
 
+// handleReconnectGaveUp marshals reconnectGaveUp onto the main thread, dropping
+// it if a newer connection has started by then: the old failure would
+// interrupt a connection the user has already moved on to.
+func (w *MainWindow) handleReconnectGaveUp(err error) {
+	connection := w.connection.current()
+	w.scheduleOnMain(func() {
+		if !w.connection.isCurrent(connection) {
+			slog.Debug("Dropping reconnect failure from a superseded connection", "error", err)
+			return
+		}
+		w.reconnectGaveUp(err)
+	})
+}
+
 // reconnectGaveUp reports a reconnect sequence that stopped without a state
 // change of its own, such as a password missing from the keyring: it says why
 // and replaces the Reconnecting display. Must run on the GTK main thread.
