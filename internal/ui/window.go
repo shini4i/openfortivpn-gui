@@ -89,6 +89,11 @@ type MainWindow struct {
 	// presentToast shows a transient confirmation. It defaults to showToast and
 	// is injectable for the same reason as presentError.
 	presentToast func(message string)
+
+	// showSavedProfile brings the profile list in line with a just-saved
+	// profile. It defaults to refreshProfileList and is injectable for the same
+	// reason as presentError.
+	showSavedProfile func(p *profile.Profile, isNew bool)
 }
 
 // NewMainWindow creates a new main window instance.
@@ -99,6 +104,7 @@ func NewMainWindow(app *adw.Application, deps *MainWindowDeps) *MainWindow {
 	}
 	w.presentError = w.showErrorDialog
 	w.presentToast = w.showToast
+	w.showSavedProfile = w.refreshProfileList
 
 	w.setupWindow(app)
 	w.setupLayout()
@@ -267,23 +273,9 @@ func (w *MainWindow) setupCallbacks() {
 
 	// Profile save callback - save changes when user clicks Save
 	w.profileEditor.OnSave(func(p *profile.Profile) {
-		isNew, err := w.saveProfile(p)
-		if err != nil {
+		if err := w.persistProfile(p); err != nil {
 			w.showError("Error Saving Profile", err.Error())
-			return
 		}
-
-		if isNew {
-			// New profile - refresh the list and select it
-			w.loadProfiles()
-			w.profileList.SelectProfile(p.ID)
-		} else {
-			// Existing profile - just update the display
-			w.profileList.UpdateProfile(p)
-		}
-
-		// Keep selected profile reference in sync
-		w.selectedProfile = p
 	})
 
 	// Profile deletion callback
@@ -459,6 +451,31 @@ func (w *MainWindow) discardRejectedPassword(err error) {
 
 	slog.Info("Discarded rejected password; the next connection will prompt again",
 		"profile_id", profileID)
+}
+
+// persistProfile saves p, shows it in the profile list and makes it the
+// selected profile. Every path that saves the editor's form goes through here,
+// so a profile saved for the first time is always added to the list. On error,
+// p is not shown in the list and selectedProfile is left untouched.
+func (w *MainWindow) persistProfile(p *profile.Profile) error {
+	isNew, err := w.saveProfile(p)
+	if err != nil {
+		return err
+	}
+	w.showSavedProfile(p, isNew)
+	w.selectedProfile = p
+	return nil
+}
+
+// refreshProfileList is the default showSavedProfile. A new profile reloads
+// the list and selects it; a tracked one only has its row updated.
+func (w *MainWindow) refreshProfileList(p *profile.Profile, isNew bool) {
+	if isNew {
+		w.loadProfiles()
+		w.profileList.SelectProfile(p.ID)
+		return
+	}
+	w.profileList.UpdateProfile(p)
 }
 
 // saveProfile persists p and then drops a stored password the profile no
@@ -734,13 +751,10 @@ func (w *MainWindow) connect() {
 	}
 
 	// Connecting persists the editor's form values too, auth method included.
-	if _, err := w.saveProfile(currentProfile); err != nil {
+	if err := w.persistProfile(currentProfile); err != nil {
 		w.showError("Error Saving Profile", err.Error())
 		return
 	}
-
-	w.profileList.UpdateProfile(currentProfile)
-	w.selectedProfile = currentProfile
 
 	// Notify that we're connecting to this profile (for auto-connect tracking)
 	if w.onProfileConnecting != nil {
